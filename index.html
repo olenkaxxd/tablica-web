@@ -14,6 +14,7 @@
 </style>
 </head>
 <body>
+
 <div id="toolbar">
   <button onclick="setColor('black')">Czarny</button>
   <button onclick="setColor('red')">Czerwony</button>
@@ -26,7 +27,99 @@
   <button onclick="prevPage()">Poprzednia</button>
   <button onclick="nextPage()">Następna</button>
 </div>
+
 <canvas id="canvas"></canvas>
-<script src="/static/script.js"></script>
+
+<script>
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+
+function resizeCanvas() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight - 50;
+    redraw();
+}
+window.addEventListener('resize', resizeCanvas);
+
+let drawing = false;
+let color = "black";
+let size = 5;
+let startX, startY;
+
+let pages = [[]];  // lista stron
+let currentPage = 0;
+
+function drawGrid() {
+    const spacing = 25;
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    ctx.strokeStyle = "#eee";
+    ctx.lineWidth = 1;
+    for(let x=0;x<canvas.width;x+=spacing){
+        ctx.beginPath();
+        ctx.moveTo(x,0);
+        ctx.lineTo(x,canvas.height);
+        ctx.stroke();
+    }
+    for(let y=0;y<canvas.height;y+=spacing){
+        ctx.beginPath();
+        ctx.moveTo(0,y);
+        ctx.lineTo(canvas.width,y);
+        ctx.stroke();
+    }
+}
+
+function redraw() {
+    drawGrid();
+    for(let line of pages[currentPage]){
+        ctx.beginPath();
+        ctx.moveTo(line[0].x,line[0].y);
+        for(let p of line) ctx.lineTo(p.x,p.y);
+        ctx.strokeStyle = line[0].color;
+        ctx.lineWidth = line[0].size;
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.stroke();
+    }
+}
+
+canvas.addEventListener("mousedown", e=>{
+    drawing = true;
+    const rect = canvas.getBoundingClientRect();
+    startX = e.clientX - rect.left;
+    startY = e.clientY - rect.top;
+    pages[currentPage].push([{x:startX, y:startY, color:color, size:size}]);
+});
+
+canvas.addEventListener("mousemove", e=>{
+    if(!drawing) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    let line = pages[currentPage][pages[currentPage].length-1];
+    line.push({x:x, y:y, color:color, size:size});
+    redraw();
+});
+
+canvas.addEventListener("mouseup", e=>{
+    drawing = false;
+});
+canvas.addEventListener("mouseleave", e=>{
+    drawing = false;
+});
+
+function setColor(c){ color=c; }
+function setSize(s){ size=parseInt(s); }
+function setEraser(){ color="white"; }
+function undo(){
+    if(pages[currentPage].length>0) pages[currentPage].pop();
+    redraw();
+}
+function newPage(){ pages.push([]); currentPage=pages.length-1; redraw(); }
+function prevPage(){ if(currentPage>0){ currentPage--; redraw(); } }
+function nextPage(){ if(currentPage<pages.length-1){ currentPage++; redraw(); } }
+
+resizeCanvas();
+</script>
+
 </body>
 </html>
