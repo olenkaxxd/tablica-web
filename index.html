@@ -2,15 +2,15 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Webowa</title>
+<title>Tablica Online Realtime</title>
 <style>
   body { margin:0; overflow:hidden; }
   #toolbar {
-    position: fixed; top: 0; left: 0; right:0; height:50px; background:#ddd; display:flex; align-items:center; padding:5px;
-    z-index:100;
+    position: fixed; top:0; left:0; right:0; height:50px;
+    background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
   }
   canvas { position:absolute; top:50px; left:0; }
-  button, select, input { margin-right:5px; }
+  button, input { margin-right:5px; }
 </style>
 </head>
 <body>
@@ -23,103 +23,116 @@
   <label>Grubość:</label>
   <input type="range" id="size" min="1" max="50" value="5" onchange="setSize(this.value)">
   <button onclick="undo()">Cofnij</button>
-  <button onclick="newPage()">Nowa strona</button>
-  <button onclick="prevPage()">Poprzednia</button>
-  <button onclick="nextPage()">Następna</button>
 </div>
 
 <canvas id="canvas"></canvas>
 
+<!-- Firebase SDK (v9 compat) -->
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+
 <script>
+// --------------------
+// Twój Firebase config
+// --------------------
+const firebaseConfig = {
+  apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
+  authDomain: "tablica-web.firebaseapp.com",
+  databaseURL: "https://tablica-web-default-rtdb.firebaseio.com",
+  projectId: "tablica-web",
+  storageBucket: "tablica-web.appspot.com",
+  messagingSenderId: "497248912756",
+  appId: "1:497248912756:web:45894617e7de8bcdf15821"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+// --------------------
+// Canvas setup
+// --------------------
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
+let drawing=false, color="black", size=5;
+let startX, startY;
+let lines=[]; // lokalna kopia linii
 
-function resizeCanvas() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight - 50;
-    redraw();
+function resizeCanvas(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight - 50;
+  redraw();
 }
 window.addEventListener('resize', resizeCanvas);
 
-let drawing = false;
-let color = "black";
-let size = 5;
-let startX, startY;
-
-let pages = [[]];  // lista stron
-let currentPage = 0;
-
-function drawGrid() {
-    const spacing = 25;
-    ctx.clearRect(0,0,canvas.width,canvas.height);
-    ctx.strokeStyle = "#eee";
-    ctx.lineWidth = 1;
-    for(let x=0;x<canvas.width;x+=spacing){
-        ctx.beginPath();
-        ctx.moveTo(x,0);
-        ctx.lineTo(x,canvas.height);
-        ctx.stroke();
-    }
-    for(let y=0;y<canvas.height;y+=spacing){
-        ctx.beginPath();
-        ctx.moveTo(0,y);
-        ctx.lineTo(canvas.width,y);
-        ctx.stroke();
-    }
+function drawGrid(){
+  const spacing = 25;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle = "#eee";
+  ctx.lineWidth = 1;
+  for(let x=0;x<canvas.width;x+=spacing){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
+  for(let y=0;y<canvas.height;y+=spacing){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
 }
 
-function redraw() {
-    drawGrid();
-    for(let line of pages[currentPage]){
-        ctx.beginPath();
-        ctx.moveTo(line[0].x,line[0].y);
-        for(let p of line) ctx.lineTo(p.x,p.y);
-        ctx.strokeStyle = line[0].color;
-        ctx.lineWidth = line[0].size;
-        ctx.lineCap = "round";
-        ctx.lineJoin = "round";
-        ctx.stroke();
-    }
+function redraw(){
+  drawGrid();
+  for(let line of lines){
+    ctx.beginPath();
+    ctx.moveTo(line[0].x,line[0].y);
+    for(let p of line) ctx.lineTo(p.x,p.y);
+    ctx.strokeStyle = line[0].color;
+    ctx.lineWidth = line[0].size;
+    ctx.lineCap="round"; ctx.lineJoin="round";
+    ctx.stroke();
+  }
 }
 
+// --------------------
+// Firebase sync
+// --------------------
+const linesRef = db.ref('lines');
+
+// Pobierz wszystkie linie przy starcie
+linesRef.on('value', snapshot=>{
+  lines = snapshot.val() || [];
+  redraw();
+});
+
+// --------------------
+// Mouse events
+// --------------------
 canvas.addEventListener("mousedown", e=>{
-    drawing = true;
-    const rect = canvas.getBoundingClientRect();
-    startX = e.clientX - rect.left;
-    startY = e.clientY - rect.top;
-    pages[currentPage].push([{x:startX, y:startY, color:color, size:size}]);
+  drawing=true;
+  const rect = canvas.getBoundingClientRect();
+  startX = e.clientX-rect.left;
+  startY = e.clientY-rect.top;
+  lines.push([{x:startX,y:startY,color:color,size:size}]);
 });
-
 canvas.addEventListener("mousemove", e=>{
-    if(!drawing) return;
-    const rect = canvas.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-    let line = pages[currentPage][pages[currentPage].length-1];
-    line.push({x:x, y:y, color:color, size:size});
-    redraw();
+  if(!drawing) return;
+  const rect = canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+  let line = lines[lines.length-1];
+  line.push({x:x,y:y,color:color,size:size});
+  redraw();
 });
+canvas.addEventListener("mouseup", e=>{ drawing=false; saveLine(); });
+canvas.addEventListener("mouseleave", e=>{ drawing=false; saveLine(); });
 
-canvas.addEventListener("mouseup", e=>{
-    drawing = false;
-});
-canvas.addEventListener("mouseleave", e=>{
-    drawing = false;
-});
-
+// --------------------
+// Toolbar functions
+// --------------------
 function setColor(c){ color=c; }
 function setSize(s){ size=parseInt(s); }
 function setEraser(){ color="white"; }
-function undo(){
-    if(pages[currentPage].length>0) pages[currentPage].pop();
-    redraw();
-}
-function newPage(){ pages.push([]); currentPage=pages.length-1; redraw(); }
-function prevPage(){ if(currentPage>0){ currentPage--; redraw(); } }
-function nextPage(){ if(currentPage<pages.length-1){ currentPage++; redraw(); } }
+function undo(){ lines.pop(); linesRef.set(lines); redraw(); }
+
+// --------------------
+// Save to Firebase
+// --------------------
+function saveLine(){ linesRef.set(lines); }
 
 resizeCanvas();
 </script>
-
 </body>
 </html>
