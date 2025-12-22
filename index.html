@@ -2,7 +2,7 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online Realtime - Poprawiona</title>
+<title>Tablica Online Realtime - Skalowanie i Obracanie</title>
 <style>
 body { margin:0; overflow:hidden; font-family:sans-serif; }
 #toolbar {
@@ -12,6 +12,7 @@ body { margin:0; overflow:hidden; font-family:sans-serif; }
 canvas { position:absolute; top:50px; left:0; cursor:crosshair; }
 button,input,select { margin-right:5px; }
 #pageName { margin-left:10px; font-weight:bold; }
+.handle { width:8px; height:8px; background:red; position:absolute; z-index:200; cursor:move; }
 </style>
 </head>
 <body>
@@ -80,8 +81,8 @@ let pages=[];
 function loadPages(){
   pagesRef.on('value', snap=>{
     pages = snap.val() || [];
+    if(!currentPage && pages.length) currentPage = pages[0].id;
     updatePageSelector();
-    if(!currentPage && pages.length) currentPage=pages[0].id;
     loadObjects();
   });
 }
@@ -135,39 +136,67 @@ function loadObjects(){
   if(!currentPage) return;
   db.ref('objects/'+currentPage).on('value', snap=>{
     objects = snap.val() || [];
+    objects.forEach(o=>{
+      o.scaleX = o.scaleX||1;
+      o.scaleY = o.scaleY||1;
+      o.rotation = o.rotation||0;
+    });
     redraw();
   });
 }
 function saveObjects(){ if(currentPage) db.ref('objects/'+currentPage).set(objects); }
 
 // ---------------- Cursor ----------------
-function updateCursor(){
+function updateCursorPosition(x,y){
   if(!currentPage) return;
-  cursorsRef.child(userId).set({timestamp:Date.now(), x:0, y:0});
-  setTimeout(updateCursor,1000);
+  cursorsRef.child(userId).set({x,y,timestamp:Date.now()});
 }
-updateCursor();
-cursorsRef.on('value', snap=>{
-  redraw();
-});
+setInterval(()=>{
+  if(!currentPage) return;
+  cursorsRef.child(userId).update({timestamp:Date.now()});
+},1000);
+
+function redrawCursors(cursors){
+  const now = Date.now();
+  for(let key in cursors){
+    const c = cursors[key];
+    if(now-c.timestamp > 3000){ cursorsRef.child(key).remove(); continue; }
+    ctx.beginPath();
+    ctx.arc(c.x,c.y,5,0,Math.PI*2);
+    ctx.fillStyle = key===userId?'green':'red';
+    ctx.fill();
+  }
+}
+cursorsRef.on('value', snap=>{ redraw(); });
 
 // ---------------- Mouse ----------------
+let dragHandle=null, dragStart=null;
 canvas.addEventListener('mousedown', e=>{
   if(!currentPage) return;
   const rect=canvas.getBoundingClientRect();
   const x=e.clientX-rect.left;
   const y=e.clientY-rect.top;
 
+  // sprawdzanie uchwytów
+  dragHandle=null;
+  for(let o of selectedObjects){
+    const handles=getHandles(o);
+    for(let h of handles){
+      if(x>=h.x-5 && x<=h.x+5 && y>=h.y-5 && y<=h.y+5){
+        dragHandle={object:o,corner:h.corner};
+        dragStart={x,y,scaleX:o.scaleX,scaleY:o.scaleY,rotation:o.rotation};
+        return;
+      }
+    }
+  }
+
   if(drawMode==='draw'){
-    drawing=true;
-    startX=x; startY=y;
-    const line={type:'line',color,size,points:[{x,y}]};
+    drawing=true; startX=x; startY=y;
+    const line={type:'line',color,size,points:[{x,y}],scaleX:1,scaleY:1,rotation:0};
     objects.push(line);
   }else if(drawMode==='select'){
-    lassoStart={x,y};
-    lassoRect=null;
-    selectedObjects=[];
-    objects.forEach(o=>o.selected=false);
+    lassoStart={x,y}; lassoRect=null;
+    selectedObjects=[]; objects.forEach(o=>o.selected=false);
   }
 });
 
@@ -176,15 +205,28 @@ canvas.addEventListener('mousemove', e=>{
   const rect=canvas.getBoundingClientRect();
   const x=e.clientX-rect.left;
   const y=e.clientY-rect.top;
+  updateCursorPosition(x,y);
 
-  cursorsRef.child(userId).set({x,y,timestamp:Date.now()});
+  if(dragHandle){
+    const o=dragHandle.object;
+    const dx=x-dragStart.x;
+    const dy=y-dragStart.y;
+    // prosta skalacja w rogach (dla uproszczenia)
+    if(dragHandle.corner==='br'){
+      o.scaleX = Math.max(0.1, dragStart.scaleX + dx/100);
+      o.scaleY = Math.max(0.1, dragStart.scaleY + dy/100);
+    }else if(dragHandle.corner==='tr'){
+      o.scaleX = Math.max(0.1, dragStart.scaleX + dx/100);
+      o.scaleY = Math.max(0.1, dragStart.scaleY - dy/100);
+    }
+    redraw();
+    return;
+  }
 
   if(drawMode==='draw' && drawing){
     const obj=objects[objects.length-1];
-    if(isShift){
-      obj.points.splice(1,obj.points.length-1);
-      obj.points.push({x,y});
-    }else obj.points.push({x,y});
+    if(isShift){ obj.points.splice(1,obj.points.length-1); obj.points.push({x,y}); }
+    else obj.points.push({x,y});
     redraw();
   }else if(drawMode==='select' && lassoStart){
     lassoRect={x1:lassoStart.x, y1:lassoStart.y, x2:x, y2:y};
@@ -194,6 +236,8 @@ canvas.addEventListener('mousemove', e=>{
 
 canvas.addEventListener('mouseup', e=>{
   drawing=false;
+  dragHandle=null;
+  dragStart=null;
   if(drawMode==='select' && lassoRect){
     const xMin=Math.min(lassoRect.x1, lassoRect.x2);
     const xMax=Math.max(lassoRect.x1, lassoRect.x2);
@@ -244,7 +288,7 @@ function addImage(file){
   reader.onload=function(e){
     const img=new Image(); img.src=e.target.result;
     img.onload=function(){
-      const obj={type:'image',img:e.target.result,x:50,y:50,w:img.width/2,h:img.height/2};
+      const obj={type:'image',img:e.target.result,x:50,y:50,w:img.width/2,h:img.height/2,scaleX:1,scaleY:1,rotation:0};
       objects.push(obj); saveObjects(); redraw();
     }
   }; reader.readAsDataURL(file);
@@ -258,7 +302,7 @@ window.addEventListener('paste', e=>{
       reader.onload=function(ev){
         const img=new Image(); img.src=ev.target.result;
         img.onload=function(){
-          const obj={type:'image',img:ev.target.result,x:50,y:50,w:img.width/2,h:img.height/2};
+          const obj={type:'image',img:ev.target.result,x:50,y:50,w:img.width/2,h:img.height/2,scaleX:1,scaleY:1,rotation:0};
           objects.push(obj); saveObjects(); redraw();
         }
       }; reader.readAsDataURL(blob);
@@ -291,10 +335,19 @@ function drawGrid(){
   }
 }
 
+// ---------------- Handles ----------------
+function getHandles(obj){
+  return [
+    {x:obj.x+obj.w*obj.scaleX, y:obj.y+obj.h*obj.scaleY, corner:'br'},
+    {x:obj.x+obj.w*obj.scaleX, y:obj.y, corner:'tr'}
+  ];
+}
+
 // ---------------- Redraw ----------------
 function redraw(){
   drawGrid();
   objects.forEach(o=>{
+    ctx.save();
     if(o.type==='line'){
       ctx.beginPath();
       ctx.moveTo(o.points[0].x,o.points[0].y);
@@ -303,24 +356,28 @@ function redraw(){
       ctx.lineWidth=o.size;
       ctx.lineCap='round'; ctx.lineJoin='round';
       ctx.stroke();
-      if(o.selected){
-        const minX=Math.min(...o.points.map(p=>p.x));
-        const maxX=Math.max(...o.points.map(p=>p.x));
-        const minY=Math.min(...o.points.map(p=>p.y));
-        const maxY=Math.max(...o.points.map(p=>p.y));
-        ctx.strokeStyle='blue'; ctx.lineWidth=2;
-        ctx.strokeRect(minX,minY,maxX-minX,maxY-minY);
-      }
     }else if(o.type==='image'){
       const img=o.img instanceof Image?o.img:(()=>{let i=new Image(); i.src=o.img; return i;})();
-      ctx.drawImage(img,o.x,o.y,o.w,o.h);
-      if(o.selected){
-        ctx.strokeStyle='blue'; ctx.lineWidth=2;
-        ctx.strokeRect(o.x,o.y,o.w,o.h);
-      }
+      ctx.translate(o.x+o.w/2, o.y+o.h/2);
+      ctx.rotate(o.rotation*Math.PI/180);
+      ctx.scale(o.scaleX,o.scaleY);
+      ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h);
+      ctx.setTransform(1,0,0,1,0,0);
     }
+    if(o.selected){
+      const minX=o.x; const minY=o.y;
+      const maxX=o.x+o.w*o.scaleX; const maxY=o.y+o.h*o.scaleY;
+      ctx.strokeStyle='blue'; ctx.lineWidth=2;
+      ctx.strokeRect(minX,minY,maxX-minX,maxY-minY);
+      // rysowanie uchwytów
+      const handles=getHandles(o);
+      handles.forEach(h=>{
+        ctx.fillStyle='red';
+        ctx.fillRect(h.x-4,h.y-4,8,8);
+      });
+    }
+    ctx.restore();
   });
-  // lasso
   if(lassoRect){
     const xMin=Math.min(lassoRect.x1,lassoRect.x2);
     const xMax=Math.max(lassoRect.x1,lassoRect.x2);
@@ -330,18 +387,9 @@ function redraw(){
     ctx.strokeRect(xMin,yMin,xMax-xMin,yMax-yMin);
     ctx.setLineDash([]);
   }
-  // cursors
-  const now=Date.now();
   cursorsRef.once('value', snap=>{
     const cursors = snap.val()||{};
-    for(let key in cursors){
-      const c=cursors[key];
-      if(now-c.timestamp>3000) continue;
-      ctx.beginPath();
-      ctx.arc(c.x,c.y,5,0,Math.PI*2);
-      ctx.fillStyle=key===userId?'green':'red';
-      ctx.fill();
-    }
+    redrawCursors(cursors);
   });
 }
 
