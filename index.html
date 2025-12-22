@@ -2,7 +2,7 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online Realtime - Obiekty</title>
+<title>Tablica Online Realtime - Select & Resize</title>
 <style>
   body { margin:0; overflow:hidden; }
   #toolbar {
@@ -16,10 +16,11 @@
 <body>
 
 <div id="toolbar">
+  <button onclick="setDrawMode('draw')">Rysowanie</button>
+  <button onclick="setDrawMode('select')">Zaznaczanie</button>
   <button onclick="setColor('black')">Czarny</button>
   <button onclick="setColor('red')">Czerwony</button>
   <button onclick="setColor('blue')">Niebieski</button>
-  <button onclick="setEraser()">Gumka</button>
   <label>Grubość:</label>
   <input type="range" id="size" min="1" max="50" value="5" onchange="setSize(this.value)">
   <button onclick="undo()">Cofnij</button>
@@ -31,11 +32,8 @@
 
 <canvas id="canvas"></canvas>
 
-<!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
-
-<!-- PDF + Canvas -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
@@ -56,13 +54,15 @@ const db = firebase.database();
 // -------------------- Canvas setup --------------------
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
+let drawMode = 'draw'; // draw / select
 let drawing=false, color="black", size=5;
 let startX, startY;
-let objects=[]; // wszystkie obiekty: line lub image
+let objects=[]; 
 let currentPage=1;
 let isShift=false;
 let selectedObject = null;
 let offsetX=0, offsetY=0;
+let resizeHandle = null;
 
 // -------------------- Resize & Grid --------------------
 function resizeCanvas(){
@@ -81,49 +81,54 @@ function drawGrid(){
   for(let y=0;y<canvas.height;y+=spacing){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
 }
 
-// -------------------- Firebase objects --------------------
+// -------------------- Firebase --------------------
 const objectsRef = db.ref('objects');
-
 objectsRef.on('value', snapshot=>{
   const all = snapshot.val() || [];
-  objects = all.filter(o => o.page === currentPage);
+  objects = all.filter(o=>o.page===currentPage);
   redraw();
 });
 
-function saveObjects(){
-  objectsRef.set(objects);
-}
+function saveObjects(){ objectsRef.set(objects); }
 
 // -------------------- Cursor --------------------
 const userId = 'user_' + Math.floor(Math.random()*1000000);
 const cursorsRef = db.ref('cursors');
 let cursors = {};
 
-canvas.addEventListener("mousemove", e => {
+canvas.addEventListener("mousemove", e=>{
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
-  
+
   cursorsRef.child(userId).set({x, y});
-  
-  if(drawing && selectedObject==null){
+
+  if(drawMode==='draw' && drawing && !selectedObject){
     let obj = objects[objects.length-1];
     if(obj.type==='line'){
       if(isShift){
         obj.points.splice(1,obj.points.length-1);
-        obj.points.push({x:x, y:y});
+        obj.points.push({x:x,y:y});
       } else {
-        obj.points.push({x:x, y:y});
+        obj.points.push({x:x,y:y});
       }
       redraw();
     }
   }
-  
-  // Przesuwanie zaznaczonego obiektu
-  if(selectedObject && selectedObject.isDragging){
-    selectedObject.x = x - offsetX;
-    selectedObject.y = y - offsetY;
-    redraw();
+
+  if(selectedObject){
+    if(selectedObject.isDragging){
+      selectedObject.x = x - offsetX;
+      selectedObject.y = y - offsetY;
+      redraw();
+    }
+    if(resizeHandle){
+      const dx = x - startX;
+      const dy = y - startY;
+      selectedObject.w = Math.max(10, selectedObject.startW + dx);
+      selectedObject.h = Math.max(10, selectedObject.startH + dy);
+      redraw();
+    }
   }
 });
 
@@ -147,45 +152,80 @@ canvas.addEventListener("mousedown", e=>{
   const rect = canvas.getBoundingClientRect();
   const x = e.clientX - rect.left;
   const y = e.clientY - rect.top;
-
-  // Sprawdzenie, czy kliknięto obraz
   selectedObject = null;
-  for(let i=objects.length-1;i>=0;i--){
-    const obj = objects[i];
-    if(obj.type==='image'){
-      if(x>=obj.x && x<=obj.x+obj.w && y>=obj.y && y<=obj.y+obj.h){
-        selectedObject=obj;
-        selectedObject.isDragging=true;
-        offsetX = x - obj.x;
-        offsetY = y - obj.y;
-        return;
+  resizeHandle = null;
+
+  if(drawMode==='select'){
+    for(let i=objects.length-1;i>=0;i--){
+      const obj = objects[i];
+      if(obj.type==='image'){
+        // uchwyt prawy dolny
+        if(x>=obj.x+obj.w-10 && x<=obj.x+obj.w && y>=obj.y+obj.h-10 && y<=obj.y+obj.h){
+          selectedObject=obj;
+          resizeHandle=true;
+          selectedObject.startW=obj.w;
+          selectedObject.startH=obj.h;
+          startX=x; startY=y;
+          return;
+        }
+        if(x>=obj.x && x<=obj.x+obj.w && y>=obj.y && y<=obj.y+obj.h){
+          selectedObject=obj;
+          selectedObject.isDragging=true;
+          offsetX = x - obj.x;
+          offsetY = y - obj.y;
+          redraw();
+          return;
+        }
+      }
+      if(obj.type==='line'){
+        // prosta metoda zaznaczania całej linii
+        const minX=Math.min(...obj.points.map(p=>p.x));
+        const maxX=Math.max(...obj.points.map(p=>p.x));
+        const minY=Math.min(...obj.points.map(p=>p.y));
+        const maxY=Math.max(...obj.points.map(p=>p.y));
+        if(x>=minX && x<=maxX && y>=minY && y<=maxY){
+          selectedObject=obj;
+          redraw();
+          return;
+        }
       }
     }
   }
 
-  // Jeśli nic nie zaznaczono, zaczynamy rysowanie linii
-  drawing=true;
-  startX = x;
-  startY = y;
-  const line = {type:'line', color:color, size:size, points:[{x:startX,y:startY}], page:currentPage};
-  objects.push(line);
+  if(drawMode==='draw'){
+    drawing=true;
+    startX = x;
+    startY = y;
+    const line = {type:'line', color:color, size:size, points:[{x:startX,y:startY}], page:currentPage};
+    objects.push(line);
+  }
 });
 
 canvas.addEventListener("mouseup", e=>{
   drawing=false;
-  if(selectedObject) selectedObject.isDragging=false;
+  if(selectedObject){
+    selectedObject.isDragging=false;
+    resizeHandle=null;
+  }
   saveObjects();
 });
 canvas.addEventListener("mouseleave", e=>{
   drawing=false;
-  if(selectedObject) selectedObject.isDragging=false;
+  if(selectedObject){
+    selectedObject.isDragging=false;
+    resizeHandle=null;
+  }
   saveObjects();
 });
 
 // -------------------- Toolbar --------------------
+function setDrawMode(mode){
+  drawMode=mode;
+  selectedObject=null;
+  redraw();
+}
 function setColor(c){ color=c; }
 function setSize(s){ size=parseInt(s); }
-function setEraser(){ color="white"; }
 function undo(){ objects.pop(); saveObjects(); redraw(); }
 
 function switchPage(page){
@@ -239,6 +279,20 @@ window.addEventListener('paste', e=>{
   }
 });
 
+// -------------------- Delete key --------------------
+window.addEventListener('keydown', e=>{
+  if(e.key==='Delete' && selectedObject){
+    objects = objects.filter(o=>o!==selectedObject);
+    selectedObject=null;
+    saveObjects();
+    redraw();
+  }
+  if(e.key==='Shift') isShift=true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='Shift') isShift=false;
+});
+
 // -------------------- PDF --------------------
 function savePDF(){
   html2canvas(canvas).then(canvasImg=>{
@@ -261,21 +315,30 @@ function redraw(){
       ctx.lineWidth = obj.size;
       ctx.lineCap="round"; ctx.lineJoin="round";
       ctx.stroke();
+      if(selectedObject===obj){
+        const minX=Math.min(...obj.points.map(p=>p.x));
+        const maxX=Math.max(...obj.points.map(p=>p.x));
+        const minY=Math.min(...obj.points.map(p=>p.y));
+        const maxY=Math.max(...obj.points.map(p=>p.y));
+        ctx.strokeStyle='blue';
+        ctx.lineWidth=2;
+        ctx.strokeRect(minX,minY,maxX-minX,maxY-minY);
+      }
     } else if(obj.type==='image'){
       ctx.drawImage(obj.img instanceof Image?obj.img:(()=>{const i=new Image();i.src=obj.img;return i})(), obj.x,obj.y,obj.w,obj.h);
       if(selectedObject===obj){
         ctx.strokeStyle='blue';
         ctx.lineWidth=2;
         ctx.strokeRect(obj.x,obj.y,obj.w,obj.h);
+        // róg skalowania
+        ctx.fillStyle='white';
+        ctx.fillRect(obj.x+obj.w-10,obj.y+obj.h-10,10,10);
+        ctx.strokeRect(obj.x+obj.w-10,obj.y+obj.h-10,10,10);
       }
     }
   }
   drawCursors();
 }
-
-// -------------------- Shift detection --------------------
-window.addEventListener('keydown', e=>{ if(e.key==='Shift') isShift=true; });
-window.addEventListener('keyup', e=>{ if(e.key==='Shift') isShift=false; });
 
 resizeCanvas();
 </script>
