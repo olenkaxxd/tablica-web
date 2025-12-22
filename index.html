@@ -2,15 +2,15 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online Realtime - Select & Resize</title>
+<title>Tablica Online Realtime - MultiPage</title>
 <style>
-  body { margin:0; overflow:hidden; }
-  #toolbar {
-    position: fixed; top:0; left:0; right:0; height:50px;
-    background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
-  }
-  canvas { position:absolute; top:50px; left:0; cursor:crosshair; }
-  button, input { margin-right:5px; }
+body { margin:0; overflow:hidden; font-family: sans-serif; }
+#toolbar {
+  position: fixed; top:0; left:0; right:0; height:50px;
+  background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
+}
+canvas { position:absolute; top:50px; left:0; cursor:crosshair; }
+button,input { margin-right:5px; }
 </style>
 </head>
 <body>
@@ -24,8 +24,10 @@
   <label>Grubość:</label>
   <input type="range" id="size" min="1" max="50" value="5" onchange="setSize(this.value)">
   <button onclick="undo()">Cofnij</button>
-  <button onclick="switchPage(1)">Strona 1</button>
-  <button onclick="switchPage(2)">Strona 2</button>
+  <button onclick="addPage()">Dodaj stronę</button>
+  <button onclick="deletePage()">Usuń stronę</button>
+  <button onclick="renamePage()">Zmień nazwę strony</button>
+  <select id="pageSelector" onchange="switchPage(this.value)"></select>
   <button onclick="savePDF()">Zapisz do PDF</button>
   <input type="file" id="imgUpload" onchange="addImage(this.files[0])">
 </div>
@@ -38,7 +40,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script>
-// -------------------- Firebase config --------------------
+// ---------------- Firebase ----------------
 const firebaseConfig = {
   apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
   authDomain: "tablica-web.firebaseapp.com",
@@ -50,21 +52,21 @@ const firebaseConfig = {
 };
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
+const pagesRef = db.ref('pages');
+const cursorsRef = db.ref('cursors');
 
-// -------------------- Canvas setup --------------------
+// ---------------- Canvas ----------------
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
-let drawMode = 'draw'; // draw / select
-let drawing=false, color="black", size=5;
+let drawMode='draw', drawing=false, color='black', size=5;
 let startX, startY;
-let objects=[]; 
-let currentPage=1;
+let objects=[], currentPage=null, selectedObjects=[];
 let isShift=false;
-let selectedObject = null;
-let offsetX=0, offsetY=0;
-let resizeHandle = null;
+let dragOffsetX=0, dragOffsetY=0;
+let lassoStart=null, lassoRect=null;
+let userId = 'user_'+Math.floor(Math.random()*1000000);
 
-// -------------------- Resize & Grid --------------------
+// ---------------- Resize ----------------
 function resizeCanvas(){
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight - 50;
@@ -72,228 +74,190 @@ function resizeCanvas(){
 }
 window.addEventListener('resize', resizeCanvas);
 
-function drawGrid(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  const spacing = 25;
-  ctx.strokeStyle = "#eee";
-  ctx.lineWidth = 1;
-  for(let x=0;x<canvas.width;x+=spacing){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
-  for(let y=0;y<canvas.height;y+=spacing){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
+// ---------------- Pages ----------------
+let pages=[];
+function loadPages(){
+  pagesRef.on('value', snap=>{
+    pages = snap.val() || [];
+    updatePageSelector();
+    if(!currentPage && pages.length) currentPage=pages[0].id;
+    loadObjects();
+  });
 }
-
-// -------------------- Firebase --------------------
-const objectsRef = db.ref('objects');
-objectsRef.on('value', snapshot=>{
-  const all = snapshot.val() || [];
-  objects = all.filter(o=>o.page===currentPage);
-  redraw();
-});
-
-function saveObjects(){ objectsRef.set(objects); }
-
-// -------------------- Cursor --------------------
-const userId = 'user_' + Math.floor(Math.random()*1000000);
-const cursorsRef = db.ref('cursors');
-let cursors = {};
-
-canvas.addEventListener("mousemove", e=>{
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-
-  cursorsRef.child(userId).set({x, y});
-
-  if(drawMode==='draw' && drawing && !selectedObject){
-    let obj = objects[objects.length-1];
-    if(obj.type==='line'){
-      if(isShift){
-        obj.points.splice(1,obj.points.length-1);
-        obj.points.push({x:x,y:y});
-      } else {
-        obj.points.push({x:x,y:y});
-      }
-      redraw();
-    }
-  }
-
-  if(selectedObject){
-    if(selectedObject.isDragging){
-      selectedObject.x = x - offsetX;
-      selectedObject.y = y - offsetY;
-      redraw();
-    }
-    if(resizeHandle){
-      const dx = x - startX;
-      const dy = y - startY;
-      selectedObject.w = Math.max(10, selectedObject.startW + dx);
-      selectedObject.h = Math.max(10, selectedObject.startH + dy);
-      redraw();
-    }
-  }
-});
-
-cursorsRef.on('value', snapshot=>{
-  cursors = snapshot.val() || {};
-  redraw();
-});
-
-function drawCursors(){
-  for(let key in cursors){
-    const c = cursors[key];
-    ctx.beginPath();
-    ctx.arc(c.x,c.y,5,0,Math.PI*2);
-    ctx.fillStyle = key===userId?'green':'red';
-    ctx.fill();
-  }
+function updatePageSelector(){
+  const sel = document.getElementById('pageSelector');
+  sel.innerHTML='';
+  pages.forEach(p=>{
+    const opt=document.createElement('option');
+    opt.value=p.id;
+    opt.text=p.name;
+    if(p.id===currentPage) opt.selected=true;
+    sel.appendChild(opt);
+  });
 }
-
-// -------------------- Mouse --------------------
-canvas.addEventListener("mousedown", e=>{
-  const rect = canvas.getBoundingClientRect();
-  const x = e.clientX - rect.left;
-  const y = e.clientY - rect.top;
-  selectedObject = null;
-  resizeHandle = null;
-
-  if(drawMode==='select'){
-    for(let i=objects.length-1;i>=0;i--){
-      const obj = objects[i];
-      if(obj.type==='image'){
-        // uchwyt prawy dolny
-        if(x>=obj.x+obj.w-10 && x<=obj.x+obj.w && y>=obj.y+obj.h-10 && y<=obj.y+obj.h){
-          selectedObject=obj;
-          resizeHandle=true;
-          selectedObject.startW=obj.w;
-          selectedObject.startH=obj.h;
-          startX=x; startY=y;
-          return;
-        }
-        if(x>=obj.x && x<=obj.x+obj.w && y>=obj.y && y<=obj.y+obj.h){
-          selectedObject=obj;
-          selectedObject.isDragging=true;
-          offsetX = x - obj.x;
-          offsetY = y - obj.y;
-          redraw();
-          return;
-        }
-      }
-      if(obj.type==='line'){
-        // prosta metoda zaznaczania całej linii
-        const minX=Math.min(...obj.points.map(p=>p.x));
-        const maxX=Math.max(...obj.points.map(p=>p.x));
-        const minY=Math.min(...obj.points.map(p=>p.y));
-        const maxY=Math.max(...obj.points.map(p=>p.y));
-        if(x>=minX && x<=maxX && y>=minY && y<=maxY){
-          selectedObject=obj;
-          redraw();
-          return;
-        }
-      }
-    }
-  }
-
-  if(drawMode==='draw'){
-    drawing=true;
-    startX = x;
-    startY = y;
-    const line = {type:'line', color:color, size:size, points:[{x:startX,y:startY}], page:currentPage};
-    objects.push(line);
-  }
-});
-
-canvas.addEventListener("mouseup", e=>{
-  drawing=false;
-  if(selectedObject){
-    selectedObject.isDragging=false;
-    resizeHandle=null;
-  }
-  saveObjects();
-});
-canvas.addEventListener("mouseleave", e=>{
-  drawing=false;
-  if(selectedObject){
-    selectedObject.isDragging=false;
-    resizeHandle=null;
-  }
-  saveObjects();
-});
-
-// -------------------- Toolbar --------------------
-function setDrawMode(mode){
-  drawMode=mode;
-  selectedObject=null;
-  redraw();
+function switchPage(id){
+  currentPage=id;
+  loadObjects();
 }
-function setColor(c){ color=c; }
-function setSize(s){ size=parseInt(s); }
-function undo(){ objects.pop(); saveObjects(); redraw(); }
-
-function switchPage(page){
-  currentPage = page;
-  objectsRef.on('value', snapshot=>{
-    const all = snapshot.val() || [];
-    objects = all.filter(o=>o.page===currentPage);
+function addPage(){
+  const name = prompt("Nazwa nowej strony","Strona "+(pages.length+1));
+  if(!name) return;
+  const id = 'page_'+Date.now();
+  pages.push({id,name});
+  pagesRef.set(pages);
+}
+function deletePage(){
+  if(!currentPage) return;
+  if(!confirm("Usunąć stronę?")) return;
+  pages = pages.filter(p=>p.id!==currentPage);
+  pagesRef.set(pages);
+  const objRef = db.ref('objects/'+currentPage);
+  objRef.remove();
+  currentPage = pages.length?pages[0].id:null;
+  updatePageSelector();
+  loadObjects();
+}
+function renamePage(){
+  if(!currentPage) return;
+  const p = pages.find(p=>p.id===currentPage);
+  const newName = prompt("Nowa nazwa strony", p.name);
+  if(!newName) return;
+  p.name = newName;
+  pagesRef.set(pages);
+}
+function loadObjects(){
+  if(!currentPage) return;
+  db.ref('objects/'+currentPage).on('value', snap=>{
+    objects = snap.val()||[];
     redraw();
   });
 }
+function saveObjects(){ if(currentPage) db.ref('objects/'+currentPage).set(objects); }
 
-// -------------------- Images --------------------
-function addImage(file){
-  const reader = new FileReader();
-  reader.onload = function(e){
-    const img = new Image();
-    img.src = e.target.result;
-    img.onload = function(){
-      const w = img.width/2;
-      const h = img.height/2;
-      const obj = {type:'image', img:e.target.result, x:50, y:50, w:w, h:h, page:currentPage};
-      objects.push(obj);
-      saveObjects();
-      redraw();
-    }
-  }
-  reader.readAsDataURL(file);
+// ---------------- Cursor ----------------
+function updateCursor(){
+  cursorsRef.child(userId).set({timestamp:Date.now(), x:0, y:0});
+  setTimeout(updateCursor,1000);
 }
+updateCursor();
+cursorsRef.on('value', snap=>{
+  redraw();
+});
 
-// -------------------- Paste from clipboard --------------------
-window.addEventListener('paste', e=>{
-  const items = e.clipboardData.items;
-  for(let i=0;i<items.length;i++){
-    if(items[i].type.indexOf("image")!==-1){
-      const blob = items[i].getAsFile();
-      const reader = new FileReader();
-      reader.onload = function(event){
-        const img = new Image();
-        img.src = event.target.result;
-        img.onload = function(){
-          const w = img.width/2;
-          const h = img.height/2;
-          const obj = {type:'image', img:event.target.result, x:50, y:50, w:w, h:h, page:currentPage};
-          objects.push(obj);
-          saveObjects();
-          redraw();
-        }
-      }
-      reader.readAsDataURL(blob);
-    }
+// ---------------- Mouse ----------------
+canvas.addEventListener('mousedown', e=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+
+  if(drawMode==='draw'){
+    drawing=true;
+    startX=x; startY=y;
+    const line={type:'line',color,size,points:[{x,y}]};
+    objects.push(line);
+  }else if(drawMode==='select'){
+    lassoStart={x,y};
+    lassoRect=null;
+    selectedObjects=[];
+    objects.forEach(o=>o.selected=false);
   }
 });
 
-// -------------------- Delete key --------------------
+canvas.addEventListener('mousemove', e=>{
+  const rect=canvas.getBoundingClientRect();
+  const x=e.clientX-rect.left;
+  const y=e.clientY-rect.top;
+
+  cursorsRef.child(userId).set({x,y,timestamp:Date.now()});
+
+  if(drawMode==='draw' && drawing){
+    const obj=objects[objects.length-1];
+    if(isShift){
+      obj.points.splice(1,obj.points.length-1);
+      obj.points.push({x,y});
+    }else obj.points.push({x,y});
+    redraw();
+  }else if(drawMode==='select' && lassoStart){
+    lassoRect={x1:lassoStart.x, y1:lassoStart.y, x2:x, y2:y};
+    redraw();
+  }
+});
+
+canvas.addEventListener('mouseup', e=>{
+  drawing=false;
+  if(drawMode==='select' && lassoRect){
+    const xMin=Math.min(lassoRect.x1, lassoRect.x2);
+    const xMax=Math.max(lassoRect.x1, lassoRect.x2);
+    const yMin=Math.min(lassoRect.y1, lassoRect.y2);
+    const yMax=Math.max(lassoRect.y1, lassoRect.y2);
+    objects.forEach(o=>{
+      if(o.type==='image'){
+        if(o.x+o.w>=xMin && o.x<=xMax && o.y+o.h>=yMin && o.y<=yMax){
+          o.selected=true; selectedObjects.push(o);
+        }
+      }else if(o.type==='line'){
+        const minX=Math.min(...o.points.map(p=>p.x));
+        const maxX=Math.max(...o.points.map(p=>p.x));
+        const minY=Math.min(...o.points.map(p=>p.y));
+        const maxY=Math.max(...o.points.map(p=>p.y));
+        if(maxX>=xMin && minX<=xMax && maxY>=yMin && minY<=yMax){
+          o.selected=true; selectedObjects.push(o);
+        }
+      }
+    });
+    lassoStart=null; lassoRect=null;
+    redraw();
+  }
+  saveObjects();
+});
+
+// ---------------- Key ----------------
 window.addEventListener('keydown', e=>{
-  if(e.key==='Delete' && selectedObject){
-    objects = objects.filter(o=>o!==selectedObject);
-    selectedObject=null;
+  if(e.key==='Delete' && selectedObjects.length){
+    objects=objects.filter(o=>!selectedObjects.includes(o));
+    selectedObjects=[];
     saveObjects();
     redraw();
   }
   if(e.key==='Shift') isShift=true;
 });
-window.addEventListener('keyup', e=>{
-  if(e.key==='Shift') isShift=false;
+window.addEventListener('keyup', e=>{ if(e.key==='Shift') isShift=false; });
+
+// ---------------- Toolbar ----------------
+function setDrawMode(mode){ drawMode=mode; selectedObjects=[]; redraw();}
+function setColor(c){ color=c; }
+function setSize(s){ size=parseInt(s); }
+function undo(){ objects.pop(); saveObjects(); redraw(); }
+
+// ---------------- Images ----------------
+function addImage(file){
+  const reader=new FileReader();
+  reader.onload=function(e){
+    const img=new Image(); img.src=e.target.result;
+    img.onload=function(){
+      const obj={type:'image',img:e.target.result,x:50,y:50,w:img.width/2,h:img.height/2};
+      objects.push(obj); saveObjects(); redraw();
+    }
+  }; reader.readAsDataURL(file);
+}
+window.addEventListener('paste', e=>{
+  const items=e.clipboardData.items;
+  for(let i=0;i<items.length;i++){
+    if(items[i].type.indexOf("image")!==-1){
+      const blob=items[i].getAsFile();
+      const reader=new FileReader();
+      reader.onload=function(ev){
+        const img=new Image(); img.src=ev.target.result;
+        img.onload=function(){
+          const obj={type:'image',img:ev.target.result,x:50,y:50,w:img.width/2,h:img.height/2};
+          objects.push(obj); saveObjects(); redraw();
+        }
+      }; reader.readAsDataURL(blob);
+    }
+  }
 });
 
-// -------------------- PDF --------------------
+// ---------------- PDF ----------------
 function savePDF(){
   html2canvas(canvas).then(canvasImg=>{
     const imgData = canvasImg.toDataURL('image/png');
@@ -303,44 +267,59 @@ function savePDF(){
   });
 }
 
-// -------------------- Redraw --------------------
+// ---------------- Redraw ----------------
 function redraw(){
   drawGrid();
-  for(let obj of objects){
-    if(obj.type==='line'){
+  objects.forEach(o=>{
+    if(o.type==='line'){
       ctx.beginPath();
-      ctx.moveTo(obj.points[0].x,obj.points[0].y);
-      for(let p of obj.points) ctx.lineTo(p.x,p.y);
-      ctx.strokeStyle = obj.color;
-      ctx.lineWidth = obj.size;
-      ctx.lineCap="round"; ctx.lineJoin="round";
+      ctx.moveTo(o.points[0].x,o.points[0].y);
+      for(let p of o.points) ctx.lineTo(p.x,p.y);
+      ctx.strokeStyle=o.color;
+      ctx.lineWidth=o.size;
+      ctx.lineCap='round'; ctx.lineJoin='round';
       ctx.stroke();
-      if(selectedObject===obj){
-        const minX=Math.min(...obj.points.map(p=>p.x));
-        const maxX=Math.max(...obj.points.map(p=>p.x));
-        const minY=Math.min(...obj.points.map(p=>p.y));
-        const maxY=Math.max(...obj.points.map(p=>p.y));
-        ctx.strokeStyle='blue';
-        ctx.lineWidth=2;
+      if(o.selected){
+        const minX=Math.min(...o.points.map(p=>p.x));
+        const maxX=Math.max(...o.points.map(p=>p.x));
+        const minY=Math.min(...o.points.map(p=>p.y));
+        const maxY=Math.max(...o.points.map(p=>p.y));
+        ctx.strokeStyle='blue'; ctx.lineWidth=2;
         ctx.strokeRect(minX,minY,maxX-minX,maxY-minY);
       }
-    } else if(obj.type==='image'){
-      ctx.drawImage(obj.img instanceof Image?obj.img:(()=>{const i=new Image();i.src=obj.img;return i})(), obj.x,obj.y,obj.w,obj.h);
-      if(selectedObject===obj){
-        ctx.strokeStyle='blue';
-        ctx.lineWidth=2;
-        ctx.strokeRect(obj.x,obj.y,obj.w,obj.h);
-        // róg skalowania
-        ctx.fillStyle='white';
-        ctx.fillRect(obj.x+obj.w-10,obj.y+obj.h-10,10,10);
-        ctx.strokeRect(obj.x+obj.w-10,obj.y+obj.h-10,10,10);
+    }else if(o.type==='image'){
+      const img=o.img instanceof Image?o.img:(()=>{let i=new Image();i.src=o.img; return i;})();
+      ctx.drawImage(img,o.x,o.y,o.w,o.h);
+      if(o.selected){
+        ctx.strokeStyle='blue'; ctx.lineWidth=2;
+        ctx.strokeRect(o.x,o.y,o.w,o.h);
       }
     }
+  });
+  // rysowanie lasso
+  if(lassoRect){
+    const xMin=Math.min(lassoRect.x1,lassoRect.x2);
+    const xMax=Math.max(lassoRect.x1,lassoRect.x2);
+    const yMin=Math.min(lassoRect.y1,lassoRect.y2);
+    const yMax=Math.max(lassoRect.y1,lassoRect.y2);
+    ctx.strokeStyle='red'; ctx.lineWidth=1; ctx.setLineDash([5,3]);
+    ctx.strokeRect(xMin,yMin,xMax-xMin,yMax-yMin);
+    ctx.setLineDash([]);
   }
-  drawCursors();
+  // cursors
+  const now=Date.now();
+  for(let key in cursors){
+    const c=cursors[key];
+    if(now-c.timestamp>3000) continue; // wygaszenie
+    ctx.beginPath();
+    ctx.arc(c.x,c.y,5,0,Math.PI*2);
+    ctx.fillStyle=key===userId?'green':'red';
+    ctx.fill();
+  }
 }
 
 resizeCanvas();
+loadPages();
 </script>
 </body>
 </html>
