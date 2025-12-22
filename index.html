@@ -23,18 +23,24 @@
   <label>Grubość:</label>
   <input type="range" id="size" min="1" max="50" value="5" onchange="setSize(this.value)">
   <button onclick="undo()">Cofnij</button>
+  <button onclick="switchPage(1)">Strona 1</button>
+  <button onclick="switchPage(2)">Strona 2</button>
+  <button onclick="savePDF()">Zapisz do PDF</button>
+  <input type="file" id="imgUpload" onchange="addImage(this.files[0])">
 </div>
 
 <canvas id="canvas"></canvas>
 
-<!-- Firebase SDK (v9 compat) -->
+<!-- Firebase SDK -->
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
 
+<!-- PDF + Canvas -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+
 <script>
-// --------------------
-// Twój Firebase config
-// --------------------
+// -------------------- Firebase config --------------------
 const firebaseConfig = {
   apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
   authDomain: "tablica-web.firebaseapp.com",
@@ -48,15 +54,15 @@ const firebaseConfig = {
 firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-// --------------------
-// Canvas setup
-// --------------------
+// -------------------- Canvas setup --------------------
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 let drawing=false, color="black", size=5;
 let startX, startY;
-let lines=[]; // lokalna kopia linii
+let lines=[]; 
+let currentPage=1;
 
+// -------------------- Resize & Grid --------------------
 function resizeCanvas(){
   canvas.width = window.innerWidth;
   canvas.height = window.innerHeight - 50;
@@ -65,72 +71,136 @@ function resizeCanvas(){
 window.addEventListener('resize', resizeCanvas);
 
 function drawGrid(){
-  const spacing = 25;
   ctx.clearRect(0,0,canvas.width,canvas.height);
+  const spacing = 25;
   ctx.strokeStyle = "#eee";
   ctx.lineWidth = 1;
   for(let x=0;x<canvas.width;x+=spacing){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,canvas.height);ctx.stroke();}
   for(let y=0;y<canvas.height;y+=spacing){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(canvas.width,y);ctx.stroke();}
 }
 
-function redraw(){
-  drawGrid();
-  for(let line of lines){
-    ctx.beginPath();
-    ctx.moveTo(line[0].x,line[0].y);
-    for(let p of line) ctx.lineTo(p.x,p.y);
-    ctx.strokeStyle = line[0].color;
-    ctx.lineWidth = line[0].size;
-    ctx.lineCap="round"; ctx.lineJoin="round";
-    ctx.stroke();
-  }
-}
-
-// --------------------
-// Firebase sync
-// --------------------
+// -------------------- Firebase lines --------------------
 const linesRef = db.ref('lines');
 
-// Pobierz wszystkie linie przy starcie
 linesRef.on('value', snapshot=>{
-  lines = snapshot.val() || [];
+  const allLines = snapshot.val() || [];
+  lines = allLines.filter(line => line[0].page === currentPage);
   redraw();
 });
 
-// --------------------
-// Mouse events
-// --------------------
+function saveLine(){ linesRef.set(lines.concat(linesRef.push().key ? [] : [])); } // dummy to update
+
+// -------------------- Cursor --------------------
+const userId = 'user_' + Math.floor(Math.random()*1000000);
+const cursorsRef = db.ref('cursors');
+let cursors = {};
+
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  const x = e.clientX - rect.left;
+  const y = e.clientY - rect.top;
+  cursorsRef.child(userId).set({x, y});
+  if(drawing){
+    let line = lines[lines.length-1];
+    line.push({x:x,y:y,color:color,size:size,page:currentPage});
+    redraw();
+  }
+});
+
+cursorsRef.on('value', snapshot => {
+  cursors = snapshot.val() || {};
+  redraw();
+});
+
+function drawCursors(){
+  for (let key in cursors){
+    const c = cursors[key];
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, 5, 0, Math.PI*2);
+    ctx.fillStyle = key===userId?'green':'red';
+    ctx.fill();
+  }
+}
+
+// -------------------- Mouse --------------------
 canvas.addEventListener("mousedown", e=>{
   drawing=true;
   const rect = canvas.getBoundingClientRect();
   startX = e.clientX-rect.left;
   startY = e.clientY-rect.top;
-  lines.push([{x:startX,y:startY,color:color,size:size}]);
+  lines.push([{x:startX,y:startY,color:color,size:size,page:currentPage}]);
 });
-canvas.addEventListener("mousemove", e=>{
-  if(!drawing) return;
-  const rect = canvas.getBoundingClientRect();
-  const x=e.clientX-rect.left;
-  const y=e.clientY-rect.top;
-  let line = lines[lines.length-1];
-  line.push({x:x,y:y,color:color,size:size});
-  redraw();
-});
-canvas.addEventListener("mouseup", e=>{ drawing=false; saveLine(); });
-canvas.addEventListener("mouseleave", e=>{ drawing=false; saveLine(); });
 
-// --------------------
-// Toolbar functions
-// --------------------
+canvas.addEventListener("mouseup", e=>{ drawing=false; linesRef.set(getAllLines()); });
+canvas.addEventListener("mouseleave", e=>{ drawing=false; linesRef.set(getAllLines()); });
+
+function getAllLines(){ // pobiera wszystkie linie + zachowuje page
+  let all = [];
+  lines.forEach(l=>all.push(l));
+  return all;
+}
+
+// -------------------- Toolbar --------------------
 function setColor(c){ color=c; }
 function setSize(s){ size=parseInt(s); }
 function setEraser(){ color="white"; }
-function undo(){ lines.pop(); linesRef.set(lines); redraw(); }
+function undo(){ lines.pop(); linesRef.set(getAllLines()); redraw(); }
 
-// --------------------
-// Save to Firebase
-// --------------------
-function saveLine(){ linesRef.set(lines); }
+function switchPage(page){
+  currentPage = page;
+  linesRef.on('value', snapshot=>{
+    const allLines = snapshot.val() || [];
+    lines = allLines.filter(line => line[0].page === currentPage);
+    redraw();
+  });
+}
+
+// -------------------- Images --------------------
+function addImage(file){
+  const reader = new FileReader();
+  reader.onload = function(e){
+    const img = new Image();
+    img.src = e.target.result;
+    img.onload = function(){
+      const w = img.width/2, h = img.height/2;
+      ctx.drawImage(img, 50, 50, w, h);
+      lines.push([{img:e.target.result,x:50,y:50,w:h,h:h,page:currentPage}]);
+      linesRef.set(getAllLines());
+    }
+  }
+  reader.readAsDataURL(file);
+}
+
+// -------------------- PDF --------------------
+function savePDF(){
+  html2canvas(canvas).then(canvasImg=>{
+    const imgData = canvasImg.toDataURL('image/png');
+    const pdf = new jspdf.jsPDF({orientation:'landscape',unit:'px',format:[canvas.width,canvas.height]});
+    pdf.addImage(imgData,'PNG',0,0,canvas.width,canvas.height);
+    pdf.save('tablica.pdf');
+  });
+}
+
+// -------------------- Redraw --------------------
+function redraw(){
+  drawGrid();
+  for(let line of lines){
+    if(line[0].img){
+      const img = new Image();
+      img.src = line[0].img;
+      ctx.drawImage(img,line[0].x,line[0].y,line[0].w,line[0].h);
+    } else {
+      ctx.beginPath();
+      ctx.moveTo(line[0].x,line[0].y);
+      for(let p of line) ctx.lineTo(p.x,p.y);
+      ctx.strokeStyle = line[0].color;
+      ctx.lineWidth = line[0].size;
+      ctx.lineCap="round"; ctx.lineJoin="round";
+      ctx.stroke();
+    }
+  }
+  drawCursors();
+}
 
 resizeCanvas();
 </script>
