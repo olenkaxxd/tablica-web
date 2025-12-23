@@ -2,133 +2,201 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online – nauczyciel i uczniowie</title>
+<title>Tablica Online</title>
+
 <style>
-body { margin:0; overflow:hidden; font-family:sans-serif; }
+body { margin:0; overflow:hidden; font-family:Arial; }
 #toolbar {
-  position: fixed; top:0; left:0; right:0; height:50px;
-  background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
+  position:fixed; top:0; left:0; right:0; height:50px;
+  background:#ddd; display:flex; align-items:center;
+  padding:5px; gap:5px; z-index:100;
 }
-canvas { position:absolute; top:50px; left:0; cursor:default; }
-button,input,select { margin-right:5px; }
-#pageName { margin-left:10px; font-weight:bold; }
+canvas { position:absolute; top:50px; left:0; }
+
+.cursor-dot {
+  position:fixed;
+  width:10px; height:10px;
+  border-radius:50%;
+  pointer-events:none;
+  transform:translate(-50%,-50%);
+  z-index:999;
+}
 </style>
 </head>
+
 <body>
 
 <div id="toolbar">
-  <button onclick="setDrawMode('draw')">Rysowanie</button>
-  <button onclick="setDrawMode('select')">Zaznaczanie</button>
-  <button onclick="setColor('black')">Czarny</button>
-  <button onclick="setColor('red')">Czerwony</button>
-  <button onclick="setColor('blue')">Niebieski</button>
-  <label>Grubość:</label>
-  <input type="range" id="size" min="1" max="30" value="5" onchange="setSize(this.value)">
-  <button onclick="undo()">Cofnij</button>
-  <button onclick="addPage()">Dodaj stronę</button>
-  <button onclick="deletePage()">Usuń stronę</button>
-  <button onclick="renamePage()">Zmień nazwę</button>
-  <button onclick="clearPage()">Wyczyść stronę</button>
-  <select id="pageSelector" onchange="switchPage(this.value)"></select>
-  <span id="pageName"></span>
-  <button onclick="savePDF()">PDF</button>
-  <input type="file" onchange="addImage(this.files[0])">
+  <button onclick="mode='draw'">✏️ Rysuj</button>
+  <button onclick="mode='select'">🖱️ Zaznacz</button>
+  <input type="color" id="color" value="#000000">
+  <input type="range" min="1" max="20" value="4" id="size">
+  <button onclick="undo()">↩ Cofnij</button>
+
+  <select id="teacherSelect" style="display:none" onchange="switchStudent(this.value)">
+    <option value="">— tablica ucznia —</option>
+  </select>
 </div>
 
 <canvas id="canvas"></canvas>
+<div id="cursor" class="cursor-dot"></div>
 
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script>
-/************** KONFIGURACJA **************/
-const students = [
-  "adam_lewicki",
-  "adam_prochera",
-  "klara_los",
-  "maciej_pawlowski",
-  "nina_bielecka",
-  "robert_los",
-  "kinga_tkaczyk"
-];
-
-const boardId = new URLSearchParams(window.location.search).get('board') || 'teacher';
-
-const firebaseConfig = {
+/* 🔥 FIREBASE */
+firebase.initializeApp({
   apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
   authDomain: "tablica-web.firebaseapp.com",
   databaseURL: "https://tablica-web-default-rtdb.firebaseio.com",
-  projectId: "tablica-web",
-};
-
-firebase.initializeApp(firebaseConfig);
+  projectId: "tablica-web"
+});
 const db = firebase.database();
 
-const pagesRef = db.ref('boards/'+boardId+'/pages');
-const cursorsRef = db.ref('boards/'+boardId+'/cursors');
+/* 👩‍🏫 UCZNIOWIE */
+const students = {
+  adam_lewicki: "Adam Lewicki",
+  adam_prochera: "Adam Prochera",
+  klara_los: "Klara Łoś",
+  maciej_pawlowski: "Maciej Pawłowski",
+  nina_bielecka: "Nina Bielecka",
+  robert_los: "Robert Łoś",
+  kinga_tkaczyk: "Kinga Tkaczyk"
+};
 
-/************** CANVAS **************/
-const canvas = document.getElementById('canvas');
-const ctx = canvas.getContext('2d');
-let drawMode='draw', drawing=false, color='black', size=5;
-let objects=[], pages=[], currentPage=null, selectedObjects=[];
-let lassoStart=null, lassoRect=null, isShift=false;
-let drag=null;
+/* 🔑 TABLICA */
+const params = new URLSearchParams(location.search);
+let board = params.get("board") || "teacher";
+let activeBoard = board;
 
-const userId='u'+Math.random().toString(36).slice(2);
+/* 👩‍🏫 PANEL NAUCZYCIELA */
+if(board === "teacher"){
+  const sel = document.getElementById("teacherSelect");
+  sel.style.display = "block";
+  for(let k in students){
+    sel.innerHTML += `<option value="${k}">${students[k]}</option>`;
+  }
+}
 
-function resize(){ canvas.width=window.innerWidth; canvas.height=window.innerHeight-50; redraw(); }
-window.addEventListener('resize',resize);
+/* 🎨 CANVAS */
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d");
+const cursor = document.getElementById("cursor");
 
-/************** STRONY **************/
-function loadPages(){ pagesRef.on('value',s=>{ pages=s.val()||[]; if(!currentPage && pages.length) currentPage=pages[0].id; updatePages(); loadObjects(); }); }
-function updatePages(){ const sel=document.getElementById('pageSelector'); sel.innerHTML=''; pages.forEach(p=>{ const o=document.createElement('option'); o.value=p.id; o.text=p.name; if(p.id===currentPage) o.selected=true; sel.appendChild(o); }); document.getElementById('pageName').textContent=pages.find(p=>p.id===currentPage)?.name||''; }
-function addPage(){ const n=prompt('Nazwa strony'); if(!n) return; const id='p'+Date.now(); pages.push({id,name:n}); pagesRef.set(pages); currentPage=id; }
-function deletePage(){ if(!confirm('Usunąć?')) return; pages=pages.filter(p=>p.id!==currentPage); pagesRef.set(pages); db.ref('boards/'+boardId+'/objects/'+currentPage).remove(); currentPage=pages[0]?.id||null; }
-function renamePage(){ const p=pages.find(p=>p.id===currentPage); const n=prompt('Nowa nazwa',p.name); if(n){ p.name=n; pagesRef.set(pages); } }
-function clearPage(){ if(!confirm('Wyczyścić?')) return; objects=[]; saveObjects(); redraw(); }
-function switchPage(id){ currentPage=id; loadObjects(); }
+function resize(){
+  canvas.width = innerWidth;
+  canvas.height = innerHeight - 50;
+  redraw();
+}
+addEventListener("resize", resize);
+resize();
 
-/************** OBIEKTY **************/
-function loadObjects(){ if(!currentPage) return; db.ref('boards/'+boardId+'/objects/'+currentPage).on('value',s=>{ objects=s.val()||[]; redraw(); }); }
-function saveObjects(){ if(currentPage) db.ref('boards/'+boardId+'/objects/'+currentPage).set(objects); }
+/* 🧠 STAN */
+let mode="draw", drawing=false;
+let objects=[], selected=null;
+let drag=false, startX=0, startY=0;
 
-/************** SIATKA **************/
-function drawGrid(){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); ctx.strokeStyle='#eee'; for(let x=0;x<canvas.width;x+=25){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke(); } for(let y=0;y<canvas.height;y+=25){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke(); } }
+/* 🔄 DANE */
+function load(){
+  db.ref("boards/"+activeBoard).on("value", s=>{
+    objects = s.val() || [];
+    redraw();
+  });
+}
+function save(){
+  db.ref("boards/"+activeBoard).set(objects);
+}
+load();
 
-/************** RYSOWANIE **************/
-canvas.addEventListener('mousedown',e=>{
-  const r=canvas.getBoundingClientRect(); const x=e.clientX-r.left; const y=e.clientY-r.top;
-  if(drawMode==='draw'){ drawing=true; objects.push({type:'line',color,size,points:[{x,y}]}); }
+/* 🖱️ MYSZ */
+canvas.onmousedown = e=>{
+  const x=e.offsetX, y=e.offsetY;
+  if(mode==="select"){
+    selected = objects.findLast(o =>
+      o.type==="image" &&
+      x>o.x && x<o.x+o.w*o.s &&
+      y>o.y && y<o.y+o.h*o.s
+    );
+    drag=!!selected;
+    startX=x; startY=y;
+  } else {
+    drawing=true;
+    objects.push({type:"line", color:color.value, size:+size.value, pts:[[x,y]]});
+  }
+};
+
+canvas.onmousemove = e=>{
+  cursor.style.left=e.clientX+"px";
+  cursor.style.top=e.clientY+"px";
+  cursor.style.background=color.value;
+  cursor.style.display = mode==="draw" ? "block":"none";
+
+  if(drawing){
+    objects.at(-1).pts.push([e.offsetX,e.offsetY]);
+    redraw();
+  }
+  if(drag && selected){
+    selected.x += e.offsetX-startX;
+    selected.y += e.offsetY-startY;
+    startX=e.offsetX; startY=e.offsetY;
+    redraw();
+  }
+};
+
+canvas.onmouseup = ()=>{
+  drawing=false; drag=false;
+  save();
+};
+
+/* 📋 CTRL+V */
+addEventListener("paste", e=>{
+  for(let i of e.clipboardData.items){
+    if(i.type.includes("image")){
+      const f=i.getAsFile();
+      const r=new FileReader();
+      r.onload=ev=>{
+        const img=new Image();
+        img.onload=()=>{
+          objects.push({
+            type:"image", img:ev.target.result,
+            x:50,y:50,w:img.width/2,h:img.height/2,s:1
+          });
+          save(); redraw();
+        };
+        img.src=ev.target.result;
+      };
+      r.readAsDataURL(f);
+    }
+  }
 });
-canvas.addEventListener('mousemove',e=>{
-  const r=canvas.getBoundingClientRect(); const x=e.clientX-r.left; const y=e.clientY-r.top;
-  if(drawing){ const o=objects.at(-1); if(isShift){ o.points=[o.points[0],{x,y}]; } else o.points.push({x,y}); redraw(); }
-});
-canvas.addEventListener('mouseup',()=>{ if(drawing){ drawing=false; saveObjects(); }});
 
-/************** OBRAZY **************/
-function addImage(file){ const rd=new FileReader(); rd.onload=e=>{ const img=new Image(); img.onload=()=>{ objects.push({type:'image',img:e.target.result,x:100,y:100,w:img.width/2,h:img.height/2,scaleX:1,scaleY:1,rotation:0}); saveObjects(); redraw(); }; img.src=e.target.result; }; rd.readAsDataURL(file); }
-window.addEventListener('paste',e=>{ for(const i of e.clipboardData.items){ if(i.type.includes('image')) addImage(i.getAsFile()); } });
+/* 🧱 RYSUJ */
+function redraw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  for(let o of objects){
+    if(o.type==="line"){
+      ctx.strokeStyle=o.color;
+      ctx.lineWidth=o.size;
+      ctx.beginPath();
+      o.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));
+      ctx.stroke();
+    }
+    if(o.type==="image"){
+      const img=new Image(); img.src=o.img;
+      ctx.drawImage(img,o.x,o.y,o.w*o.s,o.h*o.s);
+    }
+  }
+}
 
-/************** KURSOR **************/
-function drawCursor(x,y){ if(drawMode==='draw'){ ctx.beginPath(); ctx.arc(x,y,5,0,Math.PI*2); ctx.fillStyle=color; ctx.fill(); }}
-
-/************** REDRAW **************/
-function redraw(){ drawGrid(); objects.forEach(o=>{ ctx.save(); if(o.type==='line'){ ctx.beginPath(); ctx.moveTo(o.points[0].x,o.points[0].y); o.points.forEach(p=>ctx.lineTo(p.x,p.y)); ctx.strokeStyle=o.color; ctx.lineWidth=o.size; ctx.lineCap='round'; ctx.stroke(); }
- if(o.type==='image'){ const img=new Image(); img.src=o.img; ctx.translate(o.x+o.w/2,o.y+o.h/2); ctx.scale(o.scaleX,o.scaleY); ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h); }
- ctx.restore(); }); }
-
-/************** TOOLBAR **************/
-function setDrawMode(m){ drawMode=m; canvas.style.cursor=m==='draw'?'crosshair':'default'; }
-function setColor(c){ color=c; }
-function setSize(v){ size=parseInt(v); }
-function undo(){ objects.pop(); saveObjects(); redraw(); }
-function savePDF(){ html2canvas(canvas).then(c=>{ const pdf=new jspdf.jsPDF({unit:'px',format:[canvas.width,canvas.height]}); pdf.addImage(c.toDataURL(),'PNG',0,0); pdf.save('tablica.pdf'); }); }
-
-resize(); loadPages();
+/* 🔁 */
+function undo(){ objects.pop(); save(); redraw(); }
+function switchStudent(id){
+  if(!id) return;
+  db.ref("boards/"+activeBoard).off();
+  activeBoard=id;
+  load();
+}
 </script>
 </body>
 </html>
