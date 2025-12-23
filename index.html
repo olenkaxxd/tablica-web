@@ -56,22 +56,18 @@ const db = firebase.database();
 
 // ---------------- Users / Boards ----------------
 const students = ["adam_lewicki","adam_prochera","klara_los","maciej_pawlowski","nina_bielecka","robert_los","kinga_tkaczyk"];
-const urlParams = new URLSearchParams(window.location.search);
-let boardId = urlParams.get('board') || 'teacher';
-const isTeacher = boardId === 'teacher';
+let boardId = new URLSearchParams(window.location.search).get('board') || 'teacher';
+const isTeacher = boardId==='teacher';
 
 // ---------------- Canvas ----------------
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
-
 let drawMode='draw', drawing=false, color='black', size=5;
 let objects=[], pages=[], currentPage=null, selectedObjects=[];
 let draggingObject=null, dragOffsetX=0, dragOffsetY=0;
-let dragHandle=null, dragStart=null;
-let lastMousePos=null, isShift=false;
+let dragHandle=null, dragStart=null, lastMousePos=null, isShift=false;
 const userId = 'u'+Math.random().toString(36).slice(2);
 
-// Firebase refs
 let pagesRef = db.ref('boards/'+boardId+'/pages');
 let cursorsRef = db.ref('boards/'+boardId+'/cursors');
 
@@ -85,8 +81,41 @@ window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
 // ---------------- Cursor ----------------
-function updateCursor(){
-  canvas.style.cursor = drawMode==='draw'?'none':'default';
+function updateCursorPosition(x,y){
+  cursorsRef.child(userId).set({x,y,timestamp:Date.now()});
+}
+setInterval(()=>{
+  cursorsRef.child(userId).update({timestamp:Date.now()});
+},1000);
+function redrawCursors(cursors){
+  const now = Date.now();
+  for(let key in cursors){
+    const c = cursors[key];
+    if(now-c.timestamp>3000){ cursorsRef.child(key).remove(); continue; }
+    ctx.beginPath();
+    ctx.arc(c.x,c.y,5,0,Math.PI*2);
+    ctx.fillStyle = key===userId?'green':'red';
+    ctx.fill();
+  }
+}
+
+// ---------------- Boards Dropdown ----------------
+if(isTeacher){
+  const sel = document.getElementById('boardSelector');
+  sel.style.display='inline';
+  const opts = [{id:'teacher',name:'Nauczyciel'}, ...students.map(s=>({id:s,name:s}))];
+  opts.forEach(o=>{
+    const option=document.createElement('option');
+    option.value=o.id; option.text=o.name;
+    if(o.id===boardId) option.selected=true;
+    sel.appendChild(option);
+  });
+}
+function switchBoard(id){
+  boardId=id;
+  pagesRef=db.ref('boards/'+boardId+'/pages');
+  cursorsRef=db.ref('boards/'+boardId+'/cursors');
+  loadPages();
 }
 
 // ---------------- Pages ----------------
@@ -102,10 +131,9 @@ function updatePageSelector(){
   const sel = document.getElementById('pageSelector');
   sel.innerHTML='';
   pages.forEach(p=>{
-    const o = document.createElement('option');
-    o.value = p.id;
-    o.text = p.name;
-    if(p.id === currentPage) o.selected=true;
+    const o=document.createElement('option');
+    o.value=p.id; o.text=p.name;
+    if(p.id===currentPage) o.selected=true;
     sel.appendChild(o);
   });
   document.getElementById('pageName').textContent = pages.find(p=>p.id===currentPage)?.name||'';
@@ -117,6 +145,9 @@ function addPage(){
   pages.push({id,name});
   pagesRef.set(pages);
   currentPage=id;
+  objects=[];
+  saveObjects();
+  redraw();
 }
 function deletePage(){
   if(!currentPage || !confirm("Usunąć stronę?")) return;
@@ -124,6 +155,8 @@ function deletePage(){
   pagesRef.set(pages);
   db.ref('boards/'+boardId+'/objects/'+currentPage).remove();
   currentPage = pages[0]?.id || null;
+  objects=[];
+  redraw();
 }
 function renamePage(){
   const p = pages.find(p=>p.id===currentPage);
@@ -155,16 +188,17 @@ function saveObjects(){
 
 // ---------------- Mouse ----------------
 canvas.addEventListener('mousedown', e=>{
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
+  const r=canvas.getBoundingClientRect();
+  const x=e.clientX-r.left;
+  const y=e.clientY-r.top;
+  lastMousePos={x,y};
 
   // handle scale/rotate handles
   for(let o of selectedObjects){
     for(let h of getHandles(o)){
       if(Math.abs(x-h.x)<6 && Math.abs(y-h.y)<6){
-        dragHandle = {o, type:h.type};
-        dragStart = {x,y,scale:o.scaleX,rot:o.rotation};
+        dragHandle={o,type:h.type};
+        dragStart={x,y,scale:o.scaleX,rot:o.rotation};
         return;
       }
     }
@@ -176,10 +210,9 @@ canvas.addEventListener('mousedown', e=>{
     if(o.type==='image'){
       const cx=o.x+o.w/2, cy=o.y+o.h/2;
       if(Math.abs(x-cx)<=o.w*o.scaleX/2 && Math.abs(y-cy)<=o.h*o.scaleY/2){
-        selectedObjects=[o];
-        o.selected=true;
+        selectedObjects=[o]; o.selected=true;
         draggingObject=o;
-        dragOffsetX=x-cx; dragOffsetY=y-cy;
+        dragOffsetX=x-(o.x+o.w/2); dragOffsetY=y-(o.y+o.h/2);
         redraw(); clicked=true; break;
       }
     }
@@ -187,7 +220,6 @@ canvas.addEventListener('mousedown', e=>{
   if(clicked) return;
 
   selectedObjects=[]; objects.forEach(o=>o.selected=false);
-
   if(drawMode==='draw'){
     drawing=true;
     objects.push({type:'line',color,size,points:[{x,y}]});
@@ -195,13 +227,13 @@ canvas.addEventListener('mousedown', e=>{
 });
 
 canvas.addEventListener('mousemove', e=>{
-  const r = canvas.getBoundingClientRect();
-  const x = e.clientX - r.left;
-  const y = e.clientY - r.top;
+  const r=canvas.getBoundingClientRect();
+  const x=e.clientX-r.left;
+  const y=e.clientY-r.top;
   lastMousePos={x,y};
 
   if(dragHandle){
-    const o = dragHandle.o;
+    const o=dragHandle.o;
     if(dragHandle.type==='scale'){
       const cx=o.x+o.w/2, cy=o.y+o.h/2;
       const s=Math.hypot(x-cx,y-cy)/Math.hypot(dragStart.x-cx,dragStart.y-cy);
@@ -224,12 +256,12 @@ canvas.addEventListener('mousemove', e=>{
     if(isShift){ l.points=[l.points[0],{x,y}]; } else l.points.push({x,y});
     redraw();
   }
+
+  updateCursorPosition(x,y);
 });
 
 canvas.addEventListener('mouseup', e=>{
-  drawing=false;
-  draggingObject=null;
-  dragHandle=null;
+  drawing=false; draggingObject=null; dragHandle=null;
   saveObjects();
 });
 
@@ -237,14 +269,11 @@ canvas.addEventListener('mouseup', e=>{
 window.addEventListener('keydown', e=>{
   if(e.key==='Delete'){
     objects=objects.filter(o=>!o.selected);
-    saveObjects();
-    redraw();
+    saveObjects(); redraw();
   }
   if(e.key==='Shift') isShift=true;
 });
-window.addEventListener('keyup', e=>{
-  if(e.key==='Shift') isShift=false;
-});
+window.addEventListener('keyup', e=>{ if(e.key==='Shift') isShift=false; });
 
 // ---------------- Drawing ----------------
 function setDrawMode(m){ drawMode=m; canvas.style.cursor=m==='draw'?'none':'default'; }
@@ -292,8 +321,7 @@ function getHandles(o){
 
 // ---------------- Grid ----------------
 function drawGrid(){
-  ctx.fillStyle='#fff';
-  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
   ctx.strokeStyle='#eee';
   for(let x=0;x<canvas.width;x+=25){
     ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke();
@@ -309,34 +337,32 @@ function redraw(){
   objects.forEach(o=>{
     ctx.save();
     if(o.type==='line'){
-      ctx.beginPath();
-      o.points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+      ctx.beginPath(); o.points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
       ctx.strokeStyle=o.color; ctx.lineWidth=o.size; ctx.lineCap='round'; ctx.stroke();
     }
     if(o.type==='image'){
       ctx.translate(o.x+o.w/2, o.y+o.h/2);
       ctx.rotate(o.rotation*Math.PI/180);
       ctx.scale(o.scaleX,o.scaleY);
-      const img = new Image(); img.src=o.img;
+      const img=new Image(); img.src=o.img;
       ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h);
     }
     ctx.restore();
-    if(o.selected){
-      getHandles(o).forEach(h=>{
-        ctx.fillStyle='red'; ctx.fillRect(h.x-4,h.y-4,8,8);
-      });
-    }
+    if(o.selected){ getHandles(o).forEach(h=>{ctx.fillStyle='red'; ctx.fillRect(h.x-4,h.y-4,8,8);}); }
+  });
+
+  cursorsRef.once('value', snap=>{
+    const cursors = snap.val()||{};
+    redrawCursors(cursors);
   });
 
   if(drawMode==='draw' && lastMousePos){
-    ctx.beginPath();
-    ctx.arc(lastMousePos.x,lastMousePos.y,size/2,0,Math.PI*2);
+    ctx.beginPath(); ctx.arc(lastMousePos.x,lastMousePos.y,size/2,0,Math.PI*2);
     ctx.fillStyle=color; ctx.fill();
   }
 }
 
 loadPages();
-updateCursor();
 </script>
 </body>
 </html>
