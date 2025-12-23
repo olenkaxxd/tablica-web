@@ -2,18 +2,20 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online Realtime - Poprawiona Wersja</title>
+<title>Tablica Online Realtime – Final</title>
+
 <style>
 body { margin:0; overflow:hidden; font-family:sans-serif; }
 #toolbar {
   position: fixed; top:0; left:0; right:0; height:50px;
   background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
 }
-canvas { position:absolute; top:50px; left:0; cursor:crosshair; }
+canvas { position:absolute; top:50px; left:0; cursor:default; }
 button,input,select { margin-right:5px; }
 #pageName { margin-left:10px; font-weight:bold; }
 </style>
 </head>
+
 <body>
 
 <div id="toolbar">
@@ -23,7 +25,7 @@ button,input,select { margin-right:5px; }
   <button onclick="setColor('red')">Czerwony</button>
   <button onclick="setColor('blue')">Niebieski</button>
   <label>Grubość:</label>
-  <input type="range" id="size" min="1" max="50" value="5" onchange="setSize(this.value)">
+  <input type="range" min="1" max="50" value="5" onchange="setSize(this.value)">
   <button onclick="undo()">Cofnij</button>
   <button onclick="addPage()">Dodaj stronę</button>
   <button onclick="deletePage()">Usuń stronę</button>
@@ -31,8 +33,8 @@ button,input,select { margin-right:5px; }
   <button onclick="clearPage()">Wyczyść stronę</button>
   <select id="pageSelector" onchange="switchPage(this.value)"></select>
   <span id="pageName"></span>
-  <button onclick="savePDF()">Zapisz do PDF</button>
-  <input type="file" id="imgUpload" onchange="addImage(this.files[0])">
+  <button onclick="savePDF()">PDF</button>
+  <input type="file" onchange="addImage(this.files[0])">
 </div>
 
 <canvas id="canvas"></canvas>
@@ -43,88 +45,264 @@ button,input,select { margin-right:5px; }
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script>
-const firebaseConfig = { apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo", authDomain: "tablica-web.firebaseapp.com", databaseURL: "https://tablica-web-default-rtdb.firebaseio.com", projectId: "tablica-web", storageBucket: "tablica-web.appspot.com", messagingSenderId: "497248912756", appId: "1:497248912756:web:45894617e7de8bcdf15821" };
-firebase.initializeApp(firebaseConfig);
+// ---------------- Firebase ----------------
+firebase.initializeApp({
+  apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
+  authDomain: "tablica-web.firebaseapp.com",
+  databaseURL: "https://tablica-web-default-rtdb.firebaseio.com",
+  projectId: "tablica-web"
+});
 const db = firebase.database();
 const pagesRef = db.ref('pages');
 const cursorsRef = db.ref('cursors');
 
+// ---------------- Canvas ----------------
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
-let drawMode='draw', drawing=false, color='black', size=5;
-let startX, startY;
-let objects=[], currentPage=null, selectedObjects=[];
-let isShift=false, lassoStart=null, lassoRect=null;
-let userId = 'user_'+Math.floor(Math.random()*1000000);
 
-function resizeCanvas(){ canvas.width=window.innerWidth; canvas.height=window.innerHeight-50; redraw(); }
+let drawMode = 'draw';
+let drawing = false;
+let color = 'black';
+let size = 5;
+
+let objects = [];
+let selectedObjects = [];
+let currentPage = null;
+
+let draggingObject = null;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+
+let dragHandle = null;
+let dragStart = null;
+
+let lastMousePos = null;
+let isShift = false;
+
+const userId = 'user_' + Math.random().toString(36).slice(2);
+
+// ---------------- Cursor ----------------
+function updateCursor(){
+  canvas.style.cursor = drawMode === 'draw' ? 'none' : 'default';
+}
+
+// ---------------- Resize ----------------
+function resizeCanvas(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight - 50;
+  redraw();
+}
 window.addEventListener('resize', resizeCanvas);
 
-let pages=[];
-function loadPages(){ pagesRef.on('value', snap=>{ pages = snap.val()||[]; if(!currentPage && pages.length) currentPage=pages[0].id; updatePageSelector(); loadObjects(); }); }
-function updatePageSelector(){ const sel=document.getElementById('pageSelector'); sel.innerHTML=''; pages.forEach(p=>{ const opt=document.createElement('option'); opt.value=p.id; opt.text=p.name; if(p.id===currentPage) opt.selected=true; sel.appendChild(opt); }); document.getElementById('pageName').textContent=pages.find(p=>p.id===currentPage)?.name||''; }
-function switchPage(id){ currentPage=id; updatePageSelector(); loadObjects(); }
-function addPage(){ const name=prompt("Nazwa nowej strony","Strona "+(pages.length+1)); if(!name) return; const id='page_'+Date.now(); pages.push({id,name}); pagesRef.set(pages).then(()=>{ currentPage=id; updatePageSelector(); loadObjects(); }); }
-function deletePage(){ if(!currentPage) return; if(!confirm("Usunąć stronę?")) return; pages=pages.filter(p=>p.id!==currentPage); pagesRef.set(pages); db.ref('objects/'+currentPage).remove(); currentPage=pages.length?pages[0].id:null; updatePageSelector(); loadObjects(); }
-function renamePage(){ if(!currentPage) return; const p=pages.find(p=>p.id===currentPage); const newName=prompt("Nowa nazwa strony",p.name); if(!newName) return; p.name=newName; pagesRef.set(pages).then(updatePageSelector); }
-function clearPage(){ if(!currentPage) return; if(!confirm("Czy na pewno chcesz wyczyścić stronę?")) return; objects=[]; saveObjects(); redraw(); }
-function loadObjects(){ if(!currentPage) return; db.ref('objects/'+currentPage).on('value', snap=>{ objects=snap.val()||[]; objects.forEach(o=>{o.scaleX=o.scaleX||1;o.scaleY=o.scaleY||1;o.rotation=o.rotation||0;}); redraw(); }); }
-function saveObjects(){ if(currentPage) db.ref('objects/'+currentPage).set(objects); }
-
-function updateCursorPosition(x,y){ if(!currentPage) return; cursorsRef.child(userId).set({x,y,timestamp:Date.now()}); }
-setInterval(()=>{ if(!currentPage) return; cursorsRef.child(userId).update({timestamp:Date.now()}); },1000);
-function clearAllCursors(){ cursorsRef.remove(); }
-function redrawCursors(cursors){ const now=Date.now(); for(let key in cursors){ const c=cursors[key]; if(!c.timestamp || now-c.timestamp>3000){ cursorsRef.child(key).remove(); continue; } ctx.beginPath(); ctx.arc(c.x,c.y,5,0,Math.PI*2); ctx.fillStyle=key===userId?'green':'red'; ctx.fill(); } }
-cursorsRef.on('value', snap=>{ redraw(); });
-
-let dragHandle=null, dragStart=null;
-canvas.addEventListener('mousedown', e=>{
+// ---------------- Pages ----------------
+let pages = [];
+function loadPages(){
+  pagesRef.on('value', snap=>{
+    pages = snap.val() || [];
+    if(!currentPage && pages.length) currentPage = pages[0].id;
+    updatePageSelector();
+    loadObjects();
+  });
+}
+function updatePageSelector(){
+  const sel = document.getElementById('pageSelector');
+  sel.innerHTML = '';
+  pages.forEach(p=>{
+    const o = document.createElement('option');
+    o.value = p.id;
+    o.text = p.name;
+    if(p.id === currentPage) o.selected = true;
+    sel.appendChild(o);
+  });
+  document.getElementById('pageName').textContent =
+    pages.find(p=>p.id===currentPage)?.name || '';
+}
+function addPage(){
+  const name = prompt("Nazwa strony","Strona "+(pages.length+1));
+  if(!name) return;
+  const id = 'page_' + Date.now();
+  pages.push({id,name});
+  pagesRef.set(pages);
+  currentPage = id;
+}
+function deletePage(){
+  if(!currentPage || !confirm("Usunąć stronę?")) return;
+  pages = pages.filter(p=>p.id!==currentPage);
+  pagesRef.set(pages);
+  db.ref('objects/'+currentPage).remove();
+  currentPage = pages[0]?.id || null;
+}
+function renamePage(){
+  const p = pages.find(p=>p.id===currentPage);
+  const n = prompt("Nowa nazwa",p.name);
+  if(n){ p.name=n; pagesRef.set(pages); }
+}
+function clearPage(){
+  if(confirm("Wyczyścić stronę?")){
+    objects = [];
+    saveObjects();
+  }
+}
+function switchPage(id){
+  currentPage = id;
+  loadObjects();
+}
+function loadObjects(){
   if(!currentPage) return;
-  const rect=canvas.getBoundingClientRect(); const x=e.clientX-rect.left; const y=e.clientY-rect.top;
-  dragHandle=null;
-  for(let o of selectedObjects){ const handles=getHandles(o); for(let h of handles){ if(x>=h.x-5 && x<=h.x+5 && y>=h.y-5 && y<=h.y+5){ dragHandle={object:o,corner:h.corner}; dragStart={x,y,scaleX:o.scaleX,scaleY:o.scaleY,rotation:o.rotation}; return; } } }
-  if(drawMode==='draw'){ drawing=true; startX=x; startY=y; objects.push({type:'line',color,size,points:[{x,y}],scaleX:1,scaleY:1,rotation:0}); }
-  else if(drawMode==='select'){ let clicked=false; for(let o of objects){ if(o.type==='image' && x>=o.x && x<=o.x+o.w*o.scaleX && y>=o.y && y<=o.y+o.h*o.scaleY){ o.selected=true; selectedObjects=[o]; clicked=true; redraw(); return; } else if(o.type==='line'){ const minX=Math.min(...o.points.map(p=>p.x)); const maxX=Math.max(...o.points.map(p=>p.x)); const minY=Math.min(...o.points.map(p=>p.y)); const maxY=Math.max(...o.points.map(p=>p.y)); if(x>=minX && x<=maxX && y>=minY && y<=maxY){ o.selected=true; selectedObjects=[o]; clicked=true; redraw(); return; } } } if(!clicked){ lassoStart={x,y}; lassoRect=null; selectedObjects=[]; objects.forEach(o=>o.selected=false); } }
+  db.ref('objects/'+currentPage).on('value', snap=>{
+    objects = snap.val() || [];
+    redraw();
+  });
+}
+function saveObjects(){
+  if(currentPage) db.ref('objects/'+currentPage).set(objects);
+}
+
+// ---------------- Mouse ----------------
+canvas.addEventListener('mousedown', e=>{
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+
+  // handle scale / rotate
+  for(let o of selectedObjects){
+    for(let h of getHandles(o)){
+      if(Math.abs(x-h.x)<6 && Math.abs(y-h.y)<6){
+        dragHandle = {o, type:h.type};
+        dragStart = {x,y,scale:o.scaleX,rot:o.rotation};
+        return;
+      }
+    }
+  }
+
+  if(drawMode === 'draw'){
+    drawing = true;
+    objects.push({type:'line',color,size,points:[{x,y}]});
+    return;
+  }
+
+  for(let o of objects){
+    if(o.type==='image'){
+      const cx=o.x+o.w/2, cy=o.y+o.h/2;
+      if(Math.abs(x-cx)<=o.w*o.scaleX/2 && Math.abs(y-cy)<=o.h*o.scaleY/2){
+        selectedObjects=[o]; o.selected=true;
+        draggingObject=o;
+        dragOffsetX=x-cx; dragOffsetY=y-cy;
+        redraw(); return;
+      }
+    }
+  }
+  selectedObjects=[]; objects.forEach(o=>o.selected=false);
 });
 
 canvas.addEventListener('mousemove', e=>{
-  if(!currentPage) return;
-  const rect=canvas.getBoundingClientRect(); const x=e.clientX-rect.left; const y=e.clientY-rect.top;
-  updateCursorPosition(x,y);
-  if(dragHandle){ const o=dragHandle.object; const dx=x-dragStart.x; const dy=y-dragStart.y;
-    if(dragHandle.corner==='br'){ o.scaleX=Math.max(0.1,dragStart.scaleX+dx/100); o.scaleY=Math.max(0.1,dragStart.scaleY+dy/100); }
-    if(dragHandle.corner==='bl'){ o.scaleX=Math.max(0.1,dragStart.scaleX-dx/100); o.scaleY=Math.max(0.1,dragStart.scaleY+dy/100); }
-    if(dragHandle.corner==='tr'){ o.scaleX=Math.max(0.1,dragStart.scaleX+dx/100); o.scaleY=Math.max(0.1,dragStart.scaleY-dy/100); }
-    if(dragHandle.corner==='tl'){ o.scaleX=Math.max(0.1,dragStart.scaleX-dx/100); o.scaleY=Math.max(0.1,dragStart.scaleY-dy/100); }
-    if(dragHandle.corner==='rot'){ o.rotation=dragStart.rotation+dx; }
-    redraw(); return; }
-  if(drawMode==='draw' && drawing){ const obj=objects[objects.length-1]; if(isShift){ obj.points.splice(1,obj.points.length-1); obj.points.push({x,y}); } else obj.points.push({x,y}); redraw(); }
-  else if(drawMode==='select' && lassoStart){ lassoRect={x1:lassoStart.x, y1:lassoStart.y, x2:x, y2:y}; redraw(); }
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  lastMousePos={x,y};
+
+  if(dragHandle){
+    const o=dragHandle.o;
+    if(dragHandle.type==='scale'){
+      const cx=o.x+o.w/2, cy=o.y+o.h/2;
+      const s=Math.hypot(x-cx,y-cy)/Math.hypot(dragStart.x-cx,dragStart.y-cy);
+      o.scaleX=o.scaleY=Math.max(0.1,dragStart.scale*s);
+    }
+    if(dragHandle.type==='rotate'){
+      o.rotation=dragStart.rot+(x-dragStart.x);
+    }
+    redraw(); return;
+  }
+
+  if(draggingObject){
+    draggingObject.x=x-draggingObject.w/2-dragOffsetX;
+    draggingObject.y=y-draggingObject.h/2-dragOffsetY;
+    redraw(); return;
+  }
+
+  if(drawing){
+    const l=objects.at(-1);
+    l.points.push({x,y});
+    redraw();
+  }
 });
 
-canvas.addEventListener('mouseup', e=>{
-  drawing=false; dragHandle=null; dragStart=null;
-  if(drawMode==='select' && lassoRect){ const xMin=Math.min(lassoRect.x1,lassoRect.x2); const xMax=Math.max(lassoRect.x1,lassoRect.x2); const yMin=Math.min(lassoRect.y1,lassoRect.y2); const yMax=Math.max(lassoRect.y1,lassoRect.y2);
-    selectedObjects=[]; objects.forEach(o=>{ if(o.type==='image' && o.x+o.w*o.scaleX>=xMin && o.x<=xMax && o.y+o.h*o.scaleY>=yMin && o.y<=yMax){ o.selected=true; selectedObjects.push(o); } if(o.type==='line'){ const minX=Math.min(...o.points.map(p=>p.x)); const maxX=Math.max(...o.points.map(p=>p.x)); const minY=Math.min(...o.points.map(p=>p.y)); const maxY=Math.max(...o.points.map(p=>p.y)); if(maxX>=xMin && minX<=xMax && maxY>=yMin && minY<=yMax){ o.selected=true; selectedObjects.push(o); } } }); lassoStart=null; lassoRect=null; redraw(); }
+canvas.addEventListener('mouseup', ()=>{
+  drawing=false; draggingObject=null; dragHandle=null;
   saveObjects();
 });
 
-window.addEventListener('keydown', e=>{ if(e.key==='Delete' && selectedObjects.length){ objects=objects.filter(o=>!selectedObjects.includes(o)); selectedObjects=[]; saveObjects(); redraw(); } if(e.key==='Shift') isShift=true; });
-window.addEventListener('keyup', e=>{ if(e.key==='Shift') isShift=false; });
+// ---------------- Keys ----------------
+window.addEventListener('keydown', e=>{
+  if(e.key==='Delete'){
+    objects=objects.filter(o=>!o.selected);
+    saveObjects(); redraw();
+  }
+});
 
-function setDrawMode(mode){ drawMode=mode; selectedObjects=[]; redraw(); }
+// ---------------- Utils ----------------
+function setDrawMode(m){ drawMode=m; updateCursor(); }
 function setColor(c){ color=c; }
 function setSize(s){ size=parseInt(s); }
 function undo(){ objects.pop(); saveObjects(); redraw(); }
-function addImage(file){ const reader=new FileReader(); reader.onload=function(e){ const img=new Image(); img.src=e.target.result; img.onload=function(){ objects.push({type:'image',img:e.target.result,x:50,y:50,w:img.width/2,h:img.height/2,scaleX:1,scaleY:1,rotation:0}); saveObjects(); redraw(); }; }; reader.readAsDataURL(file); }
-window.addEventListener('paste', e=>{ const items=e.clipboardData.items; for(let i=0;i<items.length;i++){ if(items[i].type.indexOf("image")!==-1){ const blob=items[i].getAsFile(); const reader=new FileReader(); reader.onload=function(ev){ const img=new Image(); img.src=ev.target.result; img.onload=function(){ objects.push({type:'image',img:ev.target.result,x:50,y:50,w:img.width/2,h:img.height/2,scaleX:1,scaleY:1,rotation:0}); saveObjects(); redraw(); }; }; reader.readAsDataURL(blob); } } });
-function savePDF(){ html2canvas(canvas).then(canvasImg=>{ const imgData=canvasImg.toDataURL('image/png'); const pdf=new jspdf.jsPDF({orientation:'landscape',unit:'px',format:[canvas.width,canvas.height]}); pdf.addImage(imgData,'PNG',0,0,canvas.width,canvas.height); pdf.save('tablica.pdf'); }); }
-function drawGrid(){ ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height); const spacing=25; ctx.strokeStyle='#eee'; ctx.lineWidth=1; for(let x=0;x<canvas.width;x+=spacing){ ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke(); } for(let y=0;y<canvas.height;y+=spacing){ ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke(); } }
-function getHandles(obj){ if(obj.type!=='image') return []; return [{x:obj.x+obj.w*obj.scaleX, y:obj.y+obj.h*obj.scaleY, corner:'br'},{x:obj.x, y:obj.y+obj.h*obj.scaleY, corner:'bl'},{x:obj.x+obj.w*obj.scaleX, y:obj.y, corner:'tr'},{x:obj.x, y:obj.y, corner:'tl'},{x:obj.x+obj.w*obj.scaleX/2, y:obj.y-20, corner:'rot'}]; }
-function redraw(){ drawGrid(); objects.forEach(o=>{ ctx.save(); if(o.type==='line'){ ctx.beginPath(); ctx.moveTo(o.points[0].x,o.points[0].y); for(let p of o.points) ctx.lineTo(p.x,p.y); ctx.strokeStyle=o.color; ctx.lineWidth=o.size; ctx.lineCap='round'; ctx.lineJoin='round'; ctx.stroke(); } else if(o.type==='image'){ const img=o.img instanceof Image?o.img:(()=>{let i=new Image(); i.src=o.img; return i;})(); ctx.translate(o.x+o.w/2,o.y+o.h/2); ctx.rotate(o.rotation*Math.PI/180); ctx.scale(o.scaleX,o.scaleY); ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h); ctx.setTransform(1,0,0,1,0,0); } if(o.selected){ const minX=o.x; const minY=o.y; const maxX=o.x+o.w*o.scaleX; const maxY=o.y+o.h*o.scaleY; ctx.strokeStyle='blue'; ctx.lineWidth=2; ctx.strokeRect(minX,minY,maxX-minX,maxY-minY); getHandles(o).forEach(h=>{ ctx.fillStyle='red'; ctx.fillRect(h.x-4,h.y-4,8,8); }); } ctx.restore(); }); if(lassoRect){ const xMin=Math.min(lassoRect.x1,lassoRect.x2); const xMax=Math.max(lassoRect.x1,lassoRect.x2); const yMin=Math.min(lassoRect.y1,lassoRect.y2); const yMax=Math.max(lassoRect.y1,lassoRect.y2); ctx.strokeStyle='red'; ctx.lineWidth=1; ctx.setLineDash([5,3]); ctx.strokeRect(xMin,yMin,xMax-xMin,yMax-yMin); ctx.setLineDash([]); }
-  cursorsRef.once('value', snap=>{ redrawCursors(snap.val()||{}); });
+
+function addImage(file){
+  const r=new FileReader();
+  r.onload=e=>{
+    const i=new Image();
+    i.onload=()=>{ objects.push({type:'image',img:e.target.result,x:50,y:50,w:i.width/2,h:i.height/2,scaleX:1,scaleY:1,rotation:0}); saveObjects(); redraw(); };
+    i.src=e.target.result;
+  };
+  r.readAsDataURL(file);
 }
-resizeCanvas(); loadPages();
+
+function getHandles(o){
+  if(o.type!=='image') return [];
+  const cx=o.x+o.w/2, cy=o.y+o.h/2;
+  return [
+    {x:cx+o.w*o.scaleX/2,y:cy,type:'scale'},
+    {x:cx,y:cy-o.h*o.scaleY/2-20,type:'rotate'}
+  ];
+}
+
+// ---------------- Redraw ----------------
+function redraw(){
+  ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
+  objects.forEach(o=>{
+    ctx.save();
+    if(o.type==='line'){
+      ctx.beginPath();
+      o.points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+      ctx.strokeStyle=o.color; ctx.lineWidth=o.size; ctx.stroke();
+    }
+    if(o.type==='image'){
+      ctx.translate(o.x+o.w/2,o.y+o.h/2);
+      ctx.rotate(o.rotation*Math.PI/180);
+      ctx.scale(o.scaleX,o.scaleY);
+      const img=new Image(); img.src=o.img;
+      ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h);
+    }
+    ctx.restore();
+    if(o.selected){
+      getHandles(o).forEach(h=>{
+        ctx.fillStyle='red';
+        ctx.fillRect(h.x-4,h.y-4,8,8);
+      });
+    }
+  });
+
+  if(drawMode==='draw' && lastMousePos){
+    ctx.beginPath();
+    ctx.arc(lastMousePos.x,lastMousePos.y,size/2,0,Math.PI*2);
+    ctx.fillStyle=color;
+    ctx.fill();
+  }
+}
+
+resizeCanvas();
+updateCursor();
+loadPages();
 </script>
+
 </body>
 </html>
