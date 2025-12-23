@@ -2,201 +2,341 @@
 <html lang="pl">
 <head>
 <meta charset="UTF-8">
-<title>Tablica Online</title>
-
+<title>Tablica Online – Nauczyciel i Uczniowie</title>
 <style>
-body { margin:0; overflow:hidden; font-family:Arial; }
+body { margin:0; overflow:hidden; font-family:sans-serif; }
 #toolbar {
-  position:fixed; top:0; left:0; right:0; height:50px;
-  background:#ddd; display:flex; align-items:center;
-  padding:5px; gap:5px; z-index:100;
+  position: fixed; top:0; left:0; right:0; height:50px;
+  background:#ddd; display:flex; align-items:center; padding:5px; z-index:100;
 }
-canvas { position:absolute; top:50px; left:0; }
-
-.cursor-dot {
-  position:fixed;
-  width:10px; height:10px;
-  border-radius:50%;
-  pointer-events:none;
-  transform:translate(-50%,-50%);
-  z-index:999;
-}
+canvas { position:absolute; top:50px; left:0; cursor:crosshair; }
+button,input,select { margin-right:5px; }
+#pageName { margin-left:10px; font-weight:bold; }
 </style>
 </head>
-
 <body>
 
 <div id="toolbar">
-  <button onclick="mode='draw'">✏️ Rysuj</button>
-  <button onclick="mode='select'">🖱️ Zaznacz</button>
-  <input type="color" id="color" value="#000000">
-  <input type="range" min="1" max="20" value="4" id="size">
-  <button onclick="undo()">↩ Cofnij</button>
-
-  <select id="teacherSelect" style="display:none" onchange="switchStudent(this.value)">
-    <option value="">— tablica ucznia —</option>
-  </select>
+  <button onclick="setDrawMode('draw')">Rysowanie</button>
+  <button onclick="setDrawMode('select')">Zaznaczanie</button>
+  <button onclick="setColor('black')">Czarny</button>
+  <button onclick="setColor('red')">Czerwony</button>
+  <button onclick="setColor('blue')">Niebieski</button>
+  <label>Grubość:</label>
+  <input type="range" id="size" min="1" max="30" value="5" onchange="setSize(this.value)">
+  <button onclick="undo()">Cofnij</button>
+  <button onclick="addPage()">Dodaj stronę</button>
+  <button onclick="deletePage()">Usuń stronę</button>
+  <button onclick="renamePage()">Zmień nazwę</button>
+  <button onclick="clearPage()">Wyczyść stronę</button>
+  <select id="pageSelector" onchange="switchPage(this.value)"></select>
+  <span id="pageName"></span>
+  <button onclick="savePDF()">Zapisz do PDF</button>
+  <input type="file" id="imgUpload" onchange="addImage(this.files[0])">
+  <select id="boardSelector" style="display:none;" onchange="switchBoard(this.value)"></select>
 </div>
 
 <canvas id="canvas"></canvas>
-<div id="cursor" class="cursor-dot"></div>
 
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/9.22.0/firebase-database-compat.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
 <script>
-/* 🔥 FIREBASE */
-firebase.initializeApp({
+// ---------------- Firebase ----------------
+const firebaseConfig = {
   apiKey: "AIzaSyAU-m6n4AURX1VQL6BvKQKmA03WISQctgo",
   authDomain: "tablica-web.firebaseapp.com",
   databaseURL: "https://tablica-web-default-rtdb.firebaseio.com",
   projectId: "tablica-web"
-});
+};
+firebase.initializeApp(firebaseConfig);
 const db = firebase.database();
 
-/* 👩‍🏫 UCZNIOWIE */
-const students = {
-  adam_lewicki: "Adam Lewicki",
-  adam_prochera: "Adam Prochera",
-  klara_los: "Klara Łoś",
-  maciej_pawlowski: "Maciej Pawłowski",
-  nina_bielecka: "Nina Bielecka",
-  robert_los: "Robert Łoś",
-  kinga_tkaczyk: "Kinga Tkaczyk"
-};
+// ---------------- Users / Boards ----------------
+const students = ["adam_lewicki","adam_prochera","klara_los","maciej_pawlowski","nina_bielecka","robert_los","kinga_tkaczyk"];
+const urlParams = new URLSearchParams(window.location.search);
+let boardId = urlParams.get('board') || 'teacher';
+const isTeacher = boardId === 'teacher';
 
-/* 🔑 TABLICA */
-const params = new URLSearchParams(location.search);
-let board = params.get("board") || "teacher";
-let activeBoard = board;
+// ---------------- Canvas ----------------
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
 
-/* 👩‍🏫 PANEL NAUCZYCIELA */
-if(board === "teacher"){
-  const sel = document.getElementById("teacherSelect");
-  sel.style.display = "block";
-  for(let k in students){
-    sel.innerHTML += `<option value="${k}">${students[k]}</option>`;
-  }
-}
+let drawMode='draw', drawing=false, color='black', size=5;
+let objects=[], pages=[], currentPage=null, selectedObjects=[];
+let draggingObject=null, dragOffsetX=0, dragOffsetY=0;
+let dragHandle=null, dragStart=null;
+let lastMousePos=null, isShift=false;
+const userId = 'u'+Math.random().toString(36).slice(2);
 
-/* 🎨 CANVAS */
-const canvas = document.getElementById("canvas");
-const ctx = canvas.getContext("2d");
-const cursor = document.getElementById("cursor");
+// Firebase refs
+let pagesRef = db.ref('boards/'+boardId+'/pages');
+let cursorsRef = db.ref('boards/'+boardId+'/cursors');
 
-function resize(){
-  canvas.width = innerWidth;
-  canvas.height = innerHeight - 50;
+// ---------------- Resize ----------------
+function resizeCanvas(){
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight - 50;
   redraw();
 }
-addEventListener("resize", resize);
-resize();
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
 
-/* 🧠 STAN */
-let mode="draw", drawing=false;
-let objects=[], selected=null;
-let drag=false, startX=0, startY=0;
+// ---------------- Cursor ----------------
+function updateCursor(){
+  canvas.style.cursor = drawMode==='draw'?'none':'default';
+}
 
-/* 🔄 DANE */
-function load(){
-  db.ref("boards/"+activeBoard).on("value", s=>{
-    objects = s.val() || [];
+// ---------------- Pages ----------------
+function loadPages(){
+  pagesRef.on('value', snap=>{
+    pages = snap.val() || [];
+    if(!currentPage && pages.length) currentPage = pages[0]?.id || null;
+    updatePageSelector();
+    loadObjects();
+  });
+}
+function updatePageSelector(){
+  const sel = document.getElementById('pageSelector');
+  sel.innerHTML='';
+  pages.forEach(p=>{
+    const o = document.createElement('option');
+    o.value = p.id;
+    o.text = p.name;
+    if(p.id === currentPage) o.selected=true;
+    sel.appendChild(o);
+  });
+  document.getElementById('pageName').textContent = pages.find(p=>p.id===currentPage)?.name||'';
+}
+function addPage(){
+  const name = prompt("Nazwa nowej strony","Strona "+(pages.length+1));
+  if(!name) return;
+  const id = 'page_'+Date.now();
+  pages.push({id,name});
+  pagesRef.set(pages);
+  currentPage=id;
+}
+function deletePage(){
+  if(!currentPage || !confirm("Usunąć stronę?")) return;
+  pages = pages.filter(p=>p.id!==currentPage);
+  pagesRef.set(pages);
+  db.ref('boards/'+boardId+'/objects/'+currentPage).remove();
+  currentPage = pages[0]?.id || null;
+}
+function renamePage(){
+  const p = pages.find(p=>p.id===currentPage);
+  const n = prompt("Nowa nazwa",p.name);
+  if(n){ p.name=n; pagesRef.set(pages); }
+}
+function clearPage(){
+  if(!currentPage || !confirm("Wyczyścić stronę?")) return;
+  objects=[];
+  saveObjects();
+  redraw();
+}
+function switchPage(id){
+  currentPage=id;
+  loadObjects();
+}
+
+// ---------------- Objects ----------------
+function loadObjects(){
+  if(!currentPage) return;
+  db.ref('boards/'+boardId+'/objects/'+currentPage).on('value', snap=>{
+    objects = snap.val() || [];
     redraw();
   });
 }
-function save(){
-  db.ref("boards/"+activeBoard).set(objects);
+function saveObjects(){
+  if(currentPage) db.ref('boards/'+boardId+'/objects/'+currentPage).set(objects);
 }
-load();
 
-/* 🖱️ MYSZ */
-canvas.onmousedown = e=>{
-  const x=e.offsetX, y=e.offsetY;
-  if(mode==="select"){
-    selected = objects.findLast(o =>
-      o.type==="image" &&
-      x>o.x && x<o.x+o.w*o.s &&
-      y>o.y && y<o.y+o.h*o.s
-    );
-    drag=!!selected;
-    startX=x; startY=y;
-  } else {
-    drawing=true;
-    objects.push({type:"line", color:color.value, size:+size.value, pts:[[x,y]]});
-  }
-};
+// ---------------- Mouse ----------------
+canvas.addEventListener('mousedown', e=>{
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
 
-canvas.onmousemove = e=>{
-  cursor.style.left=e.clientX+"px";
-  cursor.style.top=e.clientY+"px";
-  cursor.style.background=color.value;
-  cursor.style.display = mode==="draw" ? "block":"none";
-
-  if(drawing){
-    objects.at(-1).pts.push([e.offsetX,e.offsetY]);
-    redraw();
-  }
-  if(drag && selected){
-    selected.x += e.offsetX-startX;
-    selected.y += e.offsetY-startY;
-    startX=e.offsetX; startY=e.offsetY;
-    redraw();
-  }
-};
-
-canvas.onmouseup = ()=>{
-  drawing=false; drag=false;
-  save();
-};
-
-/* 📋 CTRL+V */
-addEventListener("paste", e=>{
-  for(let i of e.clipboardData.items){
-    if(i.type.includes("image")){
-      const f=i.getAsFile();
-      const r=new FileReader();
-      r.onload=ev=>{
-        const img=new Image();
-        img.onload=()=>{
-          objects.push({
-            type:"image", img:ev.target.result,
-            x:50,y:50,w:img.width/2,h:img.height/2,s:1
-          });
-          save(); redraw();
-        };
-        img.src=ev.target.result;
-      };
-      r.readAsDataURL(f);
+  // handle scale/rotate handles
+  for(let o of selectedObjects){
+    for(let h of getHandles(o)){
+      if(Math.abs(x-h.x)<6 && Math.abs(y-h.y)<6){
+        dragHandle = {o, type:h.type};
+        dragStart = {x,y,scale:o.scaleX,rot:o.rotation};
+        return;
+      }
     }
+  }
+
+  // select image
+  let clicked=false;
+  for(let o of objects){
+    if(o.type==='image'){
+      const cx=o.x+o.w/2, cy=o.y+o.h/2;
+      if(Math.abs(x-cx)<=o.w*o.scaleX/2 && Math.abs(y-cy)<=o.h*o.scaleY/2){
+        selectedObjects=[o];
+        o.selected=true;
+        draggingObject=o;
+        dragOffsetX=x-cx; dragOffsetY=y-cy;
+        redraw(); clicked=true; break;
+      }
+    }
+  }
+  if(clicked) return;
+
+  selectedObjects=[]; objects.forEach(o=>o.selected=false);
+
+  if(drawMode==='draw'){
+    drawing=true;
+    objects.push({type:'line',color,size,points:[{x,y}]});
   }
 });
 
-/* 🧱 RYSUJ */
-function redraw(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-  for(let o of objects){
-    if(o.type==="line"){
-      ctx.strokeStyle=o.color;
-      ctx.lineWidth=o.size;
-      ctx.beginPath();
-      o.pts.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));
-      ctx.stroke();
+canvas.addEventListener('mousemove', e=>{
+  const r = canvas.getBoundingClientRect();
+  const x = e.clientX - r.left;
+  const y = e.clientY - r.top;
+  lastMousePos={x,y};
+
+  if(dragHandle){
+    const o = dragHandle.o;
+    if(dragHandle.type==='scale'){
+      const cx=o.x+o.w/2, cy=o.y+o.h/2;
+      const s=Math.hypot(x-cx,y-cy)/Math.hypot(dragStart.x-cx,dragStart.y-cy);
+      o.scaleX=o.scaleY=Math.max(0.1,dragStart.scale*s);
     }
-    if(o.type==="image"){
-      const img=new Image(); img.src=o.img;
-      ctx.drawImage(img,o.x,o.y,o.w*o.s,o.h*o.s);
+    if(dragHandle.type==='rotate'){
+      o.rotation = dragStart.rot + (x-dragStart.x);
     }
+    redraw(); return;
+  }
+
+  if(draggingObject){
+    draggingObject.x = x - draggingObject.w/2 - dragOffsetX;
+    draggingObject.y = y - draggingObject.h/2 - dragOffsetY;
+    redraw(); return;
+  }
+
+  if(drawing){
+    const l=objects.at(-1);
+    if(isShift){ l.points=[l.points[0],{x,y}]; } else l.points.push({x,y});
+    redraw();
+  }
+});
+
+canvas.addEventListener('mouseup', e=>{
+  drawing=false;
+  draggingObject=null;
+  dragHandle=null;
+  saveObjects();
+});
+
+// ---------------- Keyboard ----------------
+window.addEventListener('keydown', e=>{
+  if(e.key==='Delete'){
+    objects=objects.filter(o=>!o.selected);
+    saveObjects();
+    redraw();
+  }
+  if(e.key==='Shift') isShift=true;
+});
+window.addEventListener('keyup', e=>{
+  if(e.key==='Shift') isShift=false;
+});
+
+// ---------------- Drawing ----------------
+function setDrawMode(m){ drawMode=m; canvas.style.cursor=m==='draw'?'none':'default'; }
+function setColor(c){ color=c; }
+function setSize(s){ size=parseInt(s); }
+function undo(){ objects.pop(); saveObjects(); redraw(); }
+
+// ---------------- Images ----------------
+function addImage(file){
+  const r = new FileReader();
+  r.onload=e=>{
+    const i = new Image();
+    i.onload=()=>{
+      objects.push({type:'image',img:e.target.result,x:100,y:100,w:i.width/2,h:i.height/2,scaleX:1,scaleY:1,rotation:0});
+      saveObjects(); redraw();
+    };
+    i.src=e.target.result;
+  };
+  r.readAsDataURL(file);
+}
+window.addEventListener('paste', e=>{
+  for(const i of e.clipboardData.items){
+    if(i.type.includes('image')) addImage(i.getAsFile());
+  }
+});
+
+// ---------------- PDF ----------------
+function savePDF(){
+  html2canvas(canvas).then(c=>{
+    const pdf = new jspdf.jsPDF({unit:'px',format:[canvas.width,canvas.height]});
+    pdf.addImage(c.toDataURL(),'PNG',0,0);
+    pdf.save('tablica.pdf');
+  });
+}
+
+// ---------------- Handles ----------------
+function getHandles(o){
+  if(o.type!=='image') return [];
+  const cx=o.x+o.w/2, cy=o.y+o.h/2;
+  return [
+    {x:cx+o.w*o.scaleX/2, y:cy, type:'scale'},
+    {x:cx, y:cy-o.h*o.scaleY/2-20, type:'rotate'}
+  ];
+}
+
+// ---------------- Grid ----------------
+function drawGrid(){
+  ctx.fillStyle='#fff';
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+  ctx.strokeStyle='#eee';
+  for(let x=0;x<canvas.width;x+=25){
+    ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,canvas.height); ctx.stroke();
+  }
+  for(let y=0;y<canvas.height;y+=25){
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(canvas.width,y); ctx.stroke();
   }
 }
 
-/* 🔁 */
-function undo(){ objects.pop(); save(); redraw(); }
-function switchStudent(id){
-  if(!id) return;
-  db.ref("boards/"+activeBoard).off();
-  activeBoard=id;
-  load();
+// ---------------- Redraw ----------------
+function redraw(){
+  drawGrid();
+  objects.forEach(o=>{
+    ctx.save();
+    if(o.type==='line'){
+      ctx.beginPath();
+      o.points.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));
+      ctx.strokeStyle=o.color; ctx.lineWidth=o.size; ctx.lineCap='round'; ctx.stroke();
+    }
+    if(o.type==='image'){
+      ctx.translate(o.x+o.w/2, o.y+o.h/2);
+      ctx.rotate(o.rotation*Math.PI/180);
+      ctx.scale(o.scaleX,o.scaleY);
+      const img = new Image(); img.src=o.img;
+      ctx.drawImage(img,-o.w/2,-o.h/2,o.w,o.h);
+    }
+    ctx.restore();
+    if(o.selected){
+      getHandles(o).forEach(h=>{
+        ctx.fillStyle='red'; ctx.fillRect(h.x-4,h.y-4,8,8);
+      });
+    }
+  });
+
+  if(drawMode==='draw' && lastMousePos){
+    ctx.beginPath();
+    ctx.arc(lastMousePos.x,lastMousePos.y,size/2,0,Math.PI*2);
+    ctx.fillStyle=color; ctx.fill();
+  }
 }
+
+loadPages();
+updateCursor();
 </script>
 </body>
 </html>
